@@ -1,0 +1,14 @@
+[alias]
+check-blobs = ["run", "--offline", "--locked", "--quiet", "-p", "wgfeel-check-blobs", "--"]
+docs = ["run", "--offline", "--locked", "--quiet", "-p", "wgfeel-host", "--example", "docs", "--"]
+check-all = ["check", "--offline", "--locked", "--workspace", "--all-targets"]
+lint = ["clippy", "--offline", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"]
+fmt-check = ["fmt", "--all", "--", "--check"]
+audit-deps = ["audit", "--no-fetch", "--no-yanked", "--deny", "warnings", "--file", "Cargo.lock"]
+
+[env]
+# Build the reviewed, packaged AWS-LC source with the installed C toolchain.
+# Avoid selecting an unrelated host library or external code generator.
+AWS_LC_SYS_USE_SYSTEM = { value = "0", force = true }
+AWS_LC_SYS_CMAKE_BUILDER = { value = "0", force = true }
+AWS_LC_SYS_EXTERNAL_BINDGEN = { value = "0", force = true }

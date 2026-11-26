@@ -1,0 +1,39 @@
+[package]
+name = "wgfeel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wgfeel"
+path = "src/main.rs"
+
+[dependencies]
+wgfeel-core.workspace = true
+wgfeel-protocol.workspace = true
+wgfeel-host.workspace = true
+wgfeel-node.workspace = true
+aws-lc-rs.workspace = true
+wgfeel-management.workspace = true
+wgfeel-store.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+rustix = { workspace = true, features = ["net"] }
+wgfeel-wireguard.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64"))'.dependencies]
+nix = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+hickory-proto.workspace = true
+smoltcp.workspace = true
+wgfeel-test-support.workspace = true
+gotatun.workspace = true
+rustix = { workspace = true, features = ["pipe"] }
+
+[lints]
+workspace = true

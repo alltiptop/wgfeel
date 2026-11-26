@@ -1,0 +1,19 @@
+# Generated adapter for @BINARY@. Candidate output is data, never evaluated.
+_@FUNCTION@() {
+    local current="${2-${COMP_WORDS[COMP_CWORD]}}" value description
+    local -a request=("${COMP_WORDS[@]:1}")
+    request[COMP_CWORD-1]="$current"
+    COMPREPLY=()
+    while IFS=$'\t' read -r value description; do
+        case "$value" in
+            @files|@directories)
+                local kind=-f
+                [[ "$value" == @directories ]] && kind=-d
+                while IFS= read -r value; do COMPREPLY+=("$value"); done < <(compgen "$kind" -- "$current")
+                compopt -o filenames 2>/dev/null || :
+                ;;
+            *) [[ -n "$value" ]] && COMPREPLY+=("$value") ;;
+        esac
+    done < <(command "${COMP_WORDS[0]}" _complete "$((COMP_CWORD-1))" -- "${request[@]}" 2>/dev/null)
+}
+complete -F _@FUNCTION@ @BINARY@

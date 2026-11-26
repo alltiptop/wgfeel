@@ -1,0 +1,22 @@
+[package]
+name = "wgfeel-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+aws-lc-rs.workspace = true
+argon2.workspace = true
+wgfeel-core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+wgfeel-test-support.workspace = true
+
+[lints]
+workspace = true

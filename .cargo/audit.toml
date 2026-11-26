@@ -1,0 +1,16 @@
+[advisories]
+ignore = []
+
+[database]
+# Use a separately maintained local RustSec database; do not run Git operations.
+fetch = false
+stale = false
+
+[output]
+deny = ["warnings"]
+quiet = false
+
+[yanked]
+# Keep this vulnerability check independent of network/index updates.
+enabled = false
+update_index = false

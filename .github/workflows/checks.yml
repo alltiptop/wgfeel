@@ -1,0 +1,88 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  source:
+    name: Source files (no binaries or blobs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checker toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Reject binary artifacts and payload blobs
+        # Compile std-only tooling outside the checkout, before Cargo builds,
+        # dependency downloads, formatters or linters can create project outputs.
+        run: |
+          rustc --edition=2024 tools/check-blobs/src/main.rs -o "$RUNNER_TEMP/wgfeel-check-blobs"
+          "$RUNNER_TEMP/wgfeel-check-blobs" --checkout .
+
+  checks:
+    name: Build, lint, tests and documentation
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Read source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build and shell-test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential ca-certificates bash zsh
+      - name: Install project toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked Linux dependencies
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Check formatting
+        run: cargo fmt-check
+      - name: Clippy
+        run: cargo lint
+      - name: Check workspace and all targets
+        run: cargo check-all
+      - name: Check generated documentation and completion resources
+        run: cargo docs --check
+      - name: Unit tests and existing local integration tests
+        run: cargo test --offline --locked --workspace --all-targets
+      - name: Build common executable
+        run: cargo build --release --offline --locked -p wgfeel --bin wgfeel
+
+  audit:
+    name: Dependency advisories
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Read source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install project toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Install pinned dependency auditor
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: Refresh RustSec database
+        run: cargo audit update-db
+      - name: Audit locked dependencies
+        run: cargo audit-deps
