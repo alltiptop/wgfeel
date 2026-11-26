@@ -62,8 +62,10 @@ No long-term support/backport policy or security response SLA is currently defin
 
 ## Reporting a vulnerability
 
-The private reporting channel will be selected and documented after publication
-on GitHub. Until then, keep sensitive vulnerability details private.
+Send your report to the wgfeel maintainers through the
+[private vulnerability report form](https://github.com/alltiptop/wgfeel/security/advisories/new).
+If the form is unavailable, open a [GitHub issue](https://github.com/alltiptop/wgfeel/issues/new)
+asking for a private contact. Share technical details only through the private channel.
 
 Include:
 

@@ -2,7 +2,10 @@ name: Checks
 
 on:
   push:
+    branches: [main]
+    tags: ['v[0-9]*']
   pull_request:
+    types: [opened]
   workflow_dispatch:
   schedule:
     - cron: '23 6 * * 1'
@@ -11,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: checks-${{ github.workflow }}-${{ github.ref }}
+  group: checks-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -40,6 +43,7 @@ jobs:
   checks:
     name: Build, lint, tests and documentation
     needs: source
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -64,7 +68,15 @@ jobs:
       - name: Check generated documentation and completion resources
         run: cargo docs --check
       - name: Unit tests and existing local integration tests
-        run: cargo test --offline --locked --workspace --all-targets
+        # Workers require only stdin, stdout and stderr. Close inherited runner descriptors.
+        run: |
+          (
+            for path in /proc/self/fd/*; do
+              fd=${path##*/}
+              if (( fd > 2 )); then exec {fd}>&-; fi
+            done
+            exec cargo test --offline --locked --workspace --all-targets
+          )
       - name: Build common executable
         run: cargo build --release --offline --locked -p wgfeel --bin wgfeel
 

@@ -113,12 +113,14 @@ cargo fmt --all
 cargo docs
 ```
 
-[GitHub CI](../.github/workflows/checks.yml) runs on pushes, pull requests and
-manual requests; a weekly run also catches newly published advisories. Its first
-job checks the fresh source checkout for forbidden artifacts. Build, lint, tests
-and dependency auditing depend on that job succeeding. The checker uses only Rust
-std and is compiled directly with `rustc` into the runner's temporary directory,
-before Cargo dependencies are fetched or project build outputs are created.
+[GitHub CI](../.github/workflows/checks.yml) builds, lints, tests and checks
+documentation when a pull request is opened, on pushes to `main`, and on pushes
+of release tags such as `v0.1.0`. Manual and weekly runs check source files and
+dependency advisories. The first job checks the fresh checkout for forbidden
+artifacts. Build, lint, tests and dependency auditing depend on that job
+succeeding. The checker uses only the Rust standard library. CI compiles it with
+`rustc` into the runner's temporary directory before fetching Cargo dependencies
+or creating project build outputs.
 CI installs prerequisites in disposable runners and refreshes RustSec separately,
 then reports check failures without regenerating tracked files, applying fixes, committing or
 publishing artifacts. The repository token has read-only contents access and is
@@ -286,9 +288,7 @@ selected for publication and their contents before committing. Repository-state
 management and the commit itself belong to the maintainer.
 
 Keep `Cargo.lock` and generated documentation in the commit. Run the checks above
-and the release build before publication. Once the GitHub repository exists,
-replace the reporting placeholder in [Security policy](SECURITY.md) with the
-chosen private channel. Record real-host acceptance separately in
+and the release build before publication. Record real-host acceptance separately in
 [Backlog](BACKLOG.md); a green CI run is not evidence of that deployment test.
 
 ## Verification scope
