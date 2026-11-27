@@ -7,7 +7,7 @@ use gotatun::{
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     thread::{self, JoinHandle},
     time::Instant,
 };
@@ -18,21 +18,28 @@ mod enrollment_acceptance;
 // The test owns only UDP sockets and child processes. Each advertised address
 // is a controllable link: no host firewall, interface or route is modified.
 struct Links {
-    direct: Arc<AtomicBool>,
-    middle: Arc<AtomicBool>,
+    connected: Arc<Mutex<Vec<Vec<bool>>>>,
     done: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 impl Links {
-    fn start(sockets: Vec<UdpSocket>, actual: Vec<SocketAddr>) -> Self {
-        let direct = Arc::new(AtomicBool::new(true));
-        let middle = Arc::new(AtomicBool::new(true));
+    fn start(actual: Vec<SocketAddr>) -> (Self, Vec<SocketAddr>) {
+        let mut sockets = Vec::new();
+        let mut advertised = Vec::new();
+        for _ in &actual {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.set_nonblocking(true).unwrap();
+            advertised.push(socket.local_addr().unwrap());
+            sockets.push(socket);
+        }
+        let connected = Arc::new(Mutex::new(vec![vec![true; actual.len()]; actual.len()]));
+        let topology = Arc::clone(&connected);
         let done = Arc::new(AtomicBool::new(false));
-        let flags = (direct.clone(), middle.clone(), done.clone());
+        let shutdown = Arc::clone(&done);
         let thread = thread::spawn(move || {
             let mut external: Vec<(usize, SocketAddr, UdpSocket)> = vec![];
             let mut buffer = [0; 1500];
-            while !flags.2.load(Ordering::Relaxed) {
+            while !shutdown.load(Ordering::Relaxed) {
                 for (to, socket) in sockets.iter().enumerate() {
                     for _ in 0..64 {
                         let (len, source) = match socket.recv_from(&mut buffer) {
@@ -41,10 +48,7 @@ impl Links {
                             Err(error) => panic!("link read: {error}"),
                         };
                         if let Some(from) = actual.iter().position(|address| *address == source) {
-                            if (!flags.0.load(Ordering::Relaxed)
-                                && ((from == 0 && to == 2) || (from == 2 && to == 0)))
-                                || (!flags.1.load(Ordering::Relaxed) && (from == 1 || to == 1))
-                            {
+                            if !topology.lock().unwrap()[from][to] {
                                 continue;
                             }
                             sockets[from].send_to(&buffer[..len], actual[to]).unwrap();
@@ -75,11 +79,23 @@ impl Links {
                 thread::sleep(Duration::from_millis(1));
             }
         });
-        Self {
-            direct,
-            middle,
-            done,
-            thread: Some(thread),
+        (
+            Self {
+                connected,
+                done,
+                thread: Some(thread),
+            },
+            advertised,
+        )
+    }
+    fn connect_only(&self, links: &[(usize, usize)]) {
+        let mut connected = self.connected.lock().unwrap();
+        for neighbors in connected.iter_mut() {
+            neighbors.fill(false);
+        }
+        for &(from, to) in links {
+            connected[from][to] = true;
+            connected[to][from] = true;
         }
     }
 }
@@ -490,20 +506,14 @@ fn mesh_reconnects_after_long_outage_without_management() {
 fn scenario(long_outage: bool) {
     let fixture = Fixture::new();
     fixture.initialize();
-    let mut sockets = vec![];
-    let mut advertised = vec![];
     let mut actual = vec![];
     let mut nodes = vec![];
     for id in ["one", "two", "three"] {
-        let proxy = UdpSocket::bind("127.0.0.1:0").unwrap();
-        proxy.set_nonblocking(true).unwrap();
-        advertised.push(proxy.local_addr().unwrap());
-        sockets.push(proxy);
         let (child, listen) = fixture.start_child(id);
         actual.push(listen);
         nodes.push(child);
     }
-    let links = Links::start(sockets, actual.clone());
+    let (links, advertised) = Links::start(actual.clone());
     let management = fixture.start(1);
     for (id, endpoint) in ["one", "two", "three"].into_iter().zip(&advertised) {
         fixture.join_child(id, *endpoint);
@@ -575,12 +585,12 @@ fn scenario(long_outage: bool) {
     applied(&fixture, 12, &mut nodes);
     exchange(&mut clients, 0, 1, 27);
     stop(management);
-    links.direct.store(false, Ordering::Relaxed);
+    links.connect_only(&[(0, 1), (1, 2)]);
     thread::sleep(Duration::from_secs(5));
     exchange(&mut clients, 0, 1, 21);
     exchange(&mut clients, 3, 2, 22);
     if long_outage {
-        links.middle.store(false, Ordering::Relaxed);
+        links.connect_only(&[]);
         let until = Instant::now() + Duration::from_secs(105);
         while Instant::now() < until {
             for client in &mut clients {
@@ -588,7 +598,7 @@ fn scenario(long_outage: bool) {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        links.middle.store(true, Ordering::Relaxed);
+        links.connect_only(&[(0, 1), (1, 2)]);
         exchange(&mut clients, 0, 1, 24);
         exchange(&mut clients, 3, 2, 25);
     }
@@ -596,9 +606,9 @@ fn scenario(long_outage: bool) {
     clients[0] = Client::from_config(&configs[0]);
     clients[0].establish();
     exchange(&mut clients, 0, 1, 23);
-    links.direct.store(true, Ordering::Relaxed);
+    links.connect_only(&[(0, 1), (1, 2), (0, 2)]);
     thread::sleep(Duration::from_secs(5));
-    links.middle.store(false, Ordering::Relaxed);
+    links.connect_only(&[(0, 2)]);
     exchange(&mut clients, 0, 1, 31);
     exchange(&mut clients, 3, 2, 32);
     // Restart every process from its files. Exported keys and addresses survive.
@@ -628,7 +638,7 @@ fn scenario(long_outage: bool) {
     }
     exchange(&mut clients, 0, 1, 41);
     exchange(&mut clients, 3, 2, 42);
-    links.middle.store(true, Ordering::Relaxed);
+    links.connect_only(&[(0, 1), (1, 2), (0, 2)]);
     let management = fixture.start(12);
     assert_eq!(exported(&fixture, "alice", "phone"), configs[0]);
     api::json(

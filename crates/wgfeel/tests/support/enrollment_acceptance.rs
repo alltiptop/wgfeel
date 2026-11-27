@@ -145,6 +145,55 @@ fn local_exchange(clients: &mut [Client], source: usize, target: usize, marker: 
 }
 
 #[test]
+fn mesh_reroutes_through_multiple_relays_and_rejoins_partition_without_main() {
+    let manager = Fixture::new();
+    manager.initialize();
+    let main = manager.start(1);
+    let nodes =
+        ["left", "relay-a", "relay-b", "relay-c", "right"].map(|name| Node::new(&manager, name));
+    let (links, endpoints) = Links::start(nodes.iter().map(|node| node.actual[0]).collect());
+    for (index, node) in nodes.iter().enumerate() {
+        let mode = if index == 0 || index == 4 {
+            "entry"
+        } else {
+            "relay"
+        };
+        let invite = super::super::enrollment::invitation_mode(&manager, Some(mode));
+        let output = node
+            .join_command(&invite, std::slice::from_ref(&endpoints[index]))
+            .wait(Duration::from_secs(75))
+            .unwrap();
+        assert!(output.status.success(), "node {index} failed to enroll");
+    }
+    let mut clients = users(&manager, [&nodes[0].id, &nodes[4].id]);
+    stop(main);
+
+    // Only the named links can carry node-to-node UDP in each phase.
+    // Exercise both directions with two users whose device addresses overlap.
+    links.connect_only(&[(0, 4)]);
+    exchange(&mut clients, 0, 1, 61);
+    links.connect_only(&[(0, 1), (1, 2), (2, 4), (0, 3)]);
+    exchange(&mut clients, 0, 1, 62);
+    exchange(&mut clients, 3, 2, 63);
+    links.connect_only(&[(0, 3), (3, 2), (2, 4), (0, 1)]);
+    exchange(&mut clients, 0, 1, 64);
+    exchange(&mut clients, 3, 2, 65);
+
+    // Split into two internally connected components, then add a single bridge.
+    links.connect_only(&[(0, 3), (1, 2), (2, 4)]);
+    let blocked = packet(clients[0].address, clients[1].address, 66);
+    // Keep the cut in place past the six-second topology lease.
+    let until = Instant::now() + Duration::from_secs(7);
+    while Instant::now() < until {
+        clients[0].send(&blocked);
+        no_plaintext(&mut clients);
+    }
+    links.connect_only(&[(0, 3), (3, 1), (1, 2), (2, 4)]);
+    exchange(&mut clients, 0, 1, 67);
+    exchange(&mut clients, 3, 2, 68);
+}
+
+#[test]
 fn main_mesh_applies_policy_only_revisions_and_recovers_without_restarting() {
     let manager = Fixture::new();
     manager.initialize_with_traffic("127.0.0.1:0", Some("entry"));
