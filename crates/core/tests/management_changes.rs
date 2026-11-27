@@ -260,6 +260,7 @@ fn every_change_requires_exact_revision_and_cannot_wrap_generation() {
     let source = fixture(42);
     let changes = [
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("dave"),
             name: "dave".into(),
             network: network("delta"),
@@ -331,6 +332,7 @@ fn add_client_creates_only_an_empty_owned_network_without_grants_or_gateway_scop
     let changed = apply(
         &source,
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("dave"),
             name: "dave".into(),
             network: network("delta"),
@@ -352,6 +354,7 @@ fn add_client_creates_only_an_empty_owned_network_without_grants_or_gateway_scop
     reject(
         &source,
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("alice"),
             name: "alice".into(),
             network: network("delta"),
@@ -361,6 +364,7 @@ fn add_client_creates_only_an_empty_owned_network_without_grants_or_gateway_scop
     reject(
         &source,
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("dave"),
             name: "dave".into(),
             network: network("alpha"),
@@ -813,6 +817,7 @@ fn change_validation_preserves_existing_client_network_catalog_and_gateway_bound
     reject(
         &source,
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("extra"),
             name: "extra".into(),
             network: network("extra"),
@@ -866,6 +871,7 @@ fn user_names_and_device_ids_are_unique_across_the_authoritative_catalog() {
     reject(
         &source,
         ManagementChange::AddClient {
+            broadcast: true,
             client: client("different-id"),
             network: network("new-context"),
             name: "alice".into(),
@@ -886,6 +892,7 @@ fn user_names_and_device_ids_are_unique_across_the_authoritative_catalog() {
         .apply_change(
             42,
             &ManagementChange::AddClient {
+                broadcast: true,
                 client: client("generated-id"),
                 network: network("generated-id"),
                 name: "Display name".into(),

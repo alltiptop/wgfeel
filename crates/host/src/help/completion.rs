@@ -145,7 +145,7 @@ pub fn request(raw: &[OsString]) -> Completion {
     };
     if let Some((flag, value)) = pending {
         match flag {
-            "--control" | "--traffic" => {
+            "--control" | "--traffic" | "--broadcast" => {
                 for role in value.split('|') {
                     result.candidates.push(Candidate::new(role, ""));
                 }
@@ -169,10 +169,16 @@ pub fn request(raw: &[OsString]) -> Completion {
                 "egress node" | "egress replace" | "egress show" | "egress delete" => {
                     Some(Entity::Egresses)
                 }
-                "user egress list" | "user egress set" | "user egress remove" | "user show" => {
-                    Some(Entity::Users)
-                }
-                "device show" | "device delete" => Some(Entity::Devices),
+                "user egress list"
+                | "user egress set"
+                | "user egress remove"
+                | "user show"
+                | "user broadcast show"
+                | "user broadcast set" => Some(Entity::Users),
+                "device show"
+                | "device delete"
+                | "device broadcast show"
+                | "device broadcast set" => Some(Entity::Devices),
                 "node show" | "node delete" => Some(Entity::Nodes),
                 _ => None,
             };
@@ -207,6 +213,14 @@ pub fn request(raw: &[OsString]) -> Completion {
         }
         if positional == 1 && !prefix.starts_with('-') {
             match path.as_str() {
+                "user broadcast set" | "device broadcast set" => {
+                    result
+                        .candidates
+                        .extend(["on", "off"].map(|v| Candidate::new(v, "")));
+                    if path == "device broadcast set" {
+                        result.candidates.push(Candidate::new("inherit", ""));
+                    }
+                }
                 "user egress set" | "user egress remove" => result.entity = Some(Entity::Egresses),
                 "egress replace"
                     if !used.contains_key("--config-file")

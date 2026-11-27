@@ -457,7 +457,15 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
             logger.emit(false, ready.to_string());
             announced = true;
         }
-        thread::sleep(Duration::from_millis(2));
+        let idle = Duration::from_millis(2);
+        if !system
+            .as_ref()
+            .map(|(tunnel, _)| tunnel.wait_for_broadcast(idle))
+            .transpose()?
+            .unwrap_or(false)
+        {
+            thread::sleep(idle);
+        }
     }
 }
 

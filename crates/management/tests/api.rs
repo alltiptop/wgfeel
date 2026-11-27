@@ -539,7 +539,7 @@ fn authenticated_reads_are_public_exact_and_do_not_mutate_the_snapshot() {
     let users = expected
         .clients()
         .iter()
-        .map(|client| serde_json::json!({"id":client.id(), "name":client.name(), "suspended":false, "devices":client.devices(), "egresses":[]}))
+        .map(|client| serde_json::json!({"id":client.id(), "name":client.name(), "suspended":false, "broadcast":true, "devices":client.devices().iter().map(|d| serde_json::json!({"id":d.id(),"metadata":d.metadata(),"registration":{"broadcast":null,"effective_broadcast":true}})).collect::<Vec<_>>(), "egresses":[]}))
         .collect::<Vec<_>>();
     let gateways = vec![
         serde_json::json!({"recipient":"gateway-one","service_public_key":key(101),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(101)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"traffic":"entry","users":["alice","alice-work","bob"],"tenants":[{"user":"alice","public_key":key(102)},{"user":"alice-work","public_key":key(103)},{"user":"bob","public_key":key(104)}]}),
@@ -550,7 +550,7 @@ fn authenticated_reads_are_public_exact_and_do_not_mutate_the_snapshot() {
         ("/api/v1/users/alice", users[0].clone()),
         (
             "/api/v1/users/alice/devices",
-            serde_json::json!({"devices": expected.clients()[0].devices()}),
+            serde_json::json!({"devices": users[0]["devices"]}),
         ),
         (
             "/api/v1/gateways",
@@ -1222,6 +1222,8 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
         ("distribution", "get"),
         ("users", "get post"),
         ("users/{user}", "delete get"),
+        ("users/{user}/broadcast", "get put"),
+        ("users/{user}/devices/{device}/broadcast", "get put"),
         ("users/{user}/suspend", "post"),
         ("users/{user}/resume", "post"),
         ("users/{user}/devices", "get post"),
@@ -1287,6 +1289,13 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
             .contains("bearer token")
     );
 
+    let schema = &paths["/api/v1/users/{user}/devices/{device}/broadcast"]["put"]["requestBody"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(schema["required"], json!(["broadcast"]));
+    assert_eq!(
+        schema["properties"]["broadcast"]["type"],
+        json!(["boolean", "null"])
+    );
     let post = &paths["/api/v1/users"]["post"];
     let input = &post["requestBody"]["content"]["application/json"]["schema"];
     assert_eq!(input["required"], json!(["name"]));
@@ -1340,3 +1349,118 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
 
 #[path = "api/egress.rs"]
 mod egress;
+
+#[test]
+fn broadcast_put_checks_revision_and_persists_the_override_independently_of_its_effect() {
+    use serde_json::{Value, json};
+    let f = Fixture::new();
+    let mut service = f.service();
+    let device = "/api/v1/users/alice/devices/shared/broadcast";
+    let user = "/api/v1/users/alice/broadcast";
+    for (path, rev, body, status, generation) in [
+        (device, 7, "{}", 400, 7),
+        (
+            device,
+            7,
+            r#"{"effective_broadcast":true,"broadcast":false}"#,
+            400,
+            7,
+        ),
+        (device, 7, r#"{"broadcast":null}"#, 200, 7),
+        (device, 7, r#"{"broadcast":true}"#, 200, 8),
+        (device, 7, r#"{"broadcast":true}"#, 412, 8),
+        (device, 8, r#"{"broadcast":true}"#, 200, 8),
+        (user, 8, r#"{"broadcast":null}"#, 400, 8),
+        (user, 8, r#"{"broadcast":false}"#, 200, 9),
+        (user, 9, r#"{"broadcast":false}"#, 200, 9),
+        (device, 9, r#"{"broadcast":false}"#, 200, 10),
+        (device, 10, r#"{"broadcast":null}"#, 200, 11),
+    ] {
+        let r = authorized(&mut service, "PUT", path, Some(rev), body.as_bytes());
+        assert_eq!(r.status, status);
+        service = reopen(&f, service);
+        let r = authorized(&mut service, "GET", device, None, b"");
+        assert_eq!(r.generation, Some(generation));
+        let expected = match generation {
+            7 => json!({"broadcast":null,"effective_broadcast":true}),
+            8 | 9 => json!({"broadcast":true,"effective_broadcast":true}),
+            10 => json!({"broadcast":false,"effective_broadcast":false}),
+            _ => json!({"broadcast":null,"effective_broadcast":false}),
+        };
+        assert_eq!(serde_json::from_slice::<Value>(&r.body).unwrap(), expected);
+        let p = document(&mut service)
+            .routing()
+            .project_for(&node("gateway-one"))
+            .unwrap();
+        let saved = wgfeel_core::GatewayProjection::from_json(&p.to_json().unwrap()).unwrap();
+        let net = saved
+            .config()
+            .networks()
+            .iter()
+            .find(|n| n.id() == &network("alpha"))
+            .unwrap();
+        let dev = saved.device(&endpoint("alpha", "shared")).unwrap();
+        assert_eq!(json!(dev.broadcast()), expected["broadcast"]);
+        assert_eq!(
+            json!(net.effective_broadcast(dev)),
+            expected["effective_broadcast"]
+        );
+    }
+    let r = authorized(
+        &mut service,
+        "POST",
+        "/api/v1/users",
+        Some(11),
+        br#"{"name":"u","broadcast":null}"#,
+    );
+    assert_eq!(r.status, 400);
+}
+
+#[test]
+fn catalog_only_devices_are_visible_and_neither_broadcast_operation_can_register_them() {
+    use serde_json::{Value, json};
+    let initial = initial();
+    let mut clients = initial.clients().to_vec();
+    let mut devices = clients[0].devices().to_vec();
+    devices.push(catalog("spare", "Unassigned"));
+    clients[0] = owner("alice", &["alpha"], devices);
+    let f = Fixture::with_document(
+        &ManagementDocument::new(initial.routing().clone(), clients).unwrap(),
+    );
+    let mut service = f.service();
+    let r = authorized(
+        &mut service,
+        "GET",
+        "/api/v1/users/alice/devices/spare",
+        None,
+        b"",
+    );
+    let obj = serde_json::from_slice::<Value>(&r.body).unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(obj.get("registration"), Some(&Value::Null));
+    for (method, rev, b) in [
+        ("GET", None, ""),
+        ("PUT", Some(7), r#"{"broadcast":false}"#),
+    ] {
+        let r = authorized(
+            &mut service,
+            method,
+            "/api/v1/users/alice/devices/spare/broadcast",
+            rev,
+            b.as_bytes(),
+        );
+        assert_eq!(r.status, 409);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&r.body).unwrap(),
+            json!({"error":"device_unassigned"})
+        );
+        let r = authorized(
+            &mut service,
+            method,
+            "/api/v1/users/bob/devices/spare/broadcast",
+            rev,
+            b.as_bytes(),
+        );
+        assert_eq!(r.status, 404);
+    }
+}

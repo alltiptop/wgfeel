@@ -1,6 +1,6 @@
 //! Main uses the same confined forwarding workers, DNS and mesh as children.
 //! The application owns authoritative storage and the external HTTP listener.
-use super::{BATCH, Timer, control, dns, egress, mesh, receive, send, timers};
+use super::{BATCH, Forwarding, Timer, control, send, timers};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -9,7 +9,7 @@ use std::{
 use wgfeel_core::{ControlMode, GatewayProjection, NodeId, NodeKeys};
 use wgfeel_store::{LocalEgressSecrets, LocalTenants};
 use wgfeel_wireguard::{
-    ContextId, Limits, MAX_DATAGRAM_SIZE, PacketBytes, PeerConfig, PeerId, UdpListener,
+    ContextId, Limits, PacketBytes, PeerConfig, PeerId, UdpListener,
     worker::{LocalError, LocalEvent, LocalGateway, WorkerError},
 };
 use zeroize::Zeroizing;
@@ -100,9 +100,7 @@ pub struct MainForwarder {
     socket: UdpListener,
     active: Candidate,
     pending: Option<Candidate>,
-    mesh: mesh::Runtime,
-    egress: egress::Runtime,
-    dns: dns::Runtime,
+    forwarding: Forwarding,
     timers: Vec<Timer>,
     controls: Vec<PeerConfig>,
     applied_controls: Option<Vec<PeerConfig>>,
@@ -110,10 +108,7 @@ pub struct MainForwarder {
     control_timer: Timer,
     service_peers: Vec<ServicePeer>,
     outgoing: VecDeque<(NodeId, Zeroizing<Vec<u8>>, Instant)>,
-    incoming: VecDeque<(SocketAddr, Vec<u8>, Instant)>,
     started: Instant,
-    buffer: Box<[u8; MAX_DATAGRAM_SIZE + 1]>,
-    ingress_first: bool,
 }
 impl MainForwarder {
     pub fn bind(
@@ -128,9 +123,7 @@ impl MainForwarder {
         let service_peers = service_peers(projection, &socket);
         Ok(Self {
             socket,
-            mesh: mesh::Runtime::new(projection)?,
-            egress: egress::Runtime::new(&active.gateway),
-            dns: dns::Runtime::default(),
+            forwarding: Forwarding::new(&active.gateway)?,
             timers: timers(&active.gateway, true),
             active,
             pending: None,
@@ -140,10 +133,7 @@ impl MainForwarder {
             control_timer: control_timer(&[]),
             service_peers,
             outgoing: VecDeque::with_capacity(QUEUE),
-            incoming: VecDeque::with_capacity(64),
             started: Instant::now(),
-            buffer: Box::new([0; MAX_DATAGRAM_SIZE + 1]),
-            ingress_first: false,
         })
     }
     pub fn ready(&self) -> bool {
@@ -209,15 +199,15 @@ impl MainForwarder {
             // Prepare all fallible routing state before publishing the revision.
             // A policy-only update keeps crypto sessions, but not old mesh ACLs,
             // fragment assemblies, queued output or outstanding DNS decisions.
-            let mesh = self.mesh.replacement(projection)?;
+            let mesh = self.forwarding.mesh.replacement(projection)?;
             self.active
                 .gateway
                 .replace_projection(projection)
                 .map_err(|_| "cannot apply main forwarding policy")?;
-            self.mesh = mesh;
-            self.egress.configure(&self.active.gateway);
+            self.forwarding.mesh = mesh;
+            self.forwarding.egress.configure(&self.active.gateway);
             self.outgoing.clear();
-            self.dns.reset();
+            self.forwarding.dns.reset();
             return Ok(());
         }
         self.pending = Some(spawn(
@@ -268,17 +258,19 @@ impl MainForwarder {
             return Ok(events);
         }
         for _ in 0..BATCH {
-            match self.active.gateway.poll() {
-                Some(LocalEvent::ProviderOutput(datagram)) => {
-                    self.egress.send(&mut self.active.gateway, datagram)
-                }
+            match self.active.gateway.poll_ordinary() {
+                Some(LocalEvent::ProviderOutput(datagram)) => self
+                    .forwarding
+                    .egress
+                    .send(&mut self.active.gateway, datagram),
                 Some(LocalEvent::Network(datagram)) => send(&self.socket, datagram),
                 Some(event @ (LocalEvent::Mesh { .. } | LocalEvent::MeshOutput { .. })) => {
-                    self.mesh
+                    self.forwarding
+                        .mesh
                         .event(event, self.started.elapsed(), &self.active.gateway);
                 }
                 Some(LocalEvent::Dns { source, packet }) => {
-                    self.dns.receive(source, packet.as_bytes())
+                    self.forwarding.dns.receive(source, packet.as_bytes())
                 }
                 Some(LocalEvent::Control { peer, packet }) => {
                     if let Some(connection) = self.service_peers.iter_mut().find(|p| p.id == peer) {
@@ -313,17 +305,10 @@ impl MainForwarder {
                     generation,
                     ..
                 }) => {
-                    self.egress.failed(&context);
-                    if context == ContextId::Service {
-                        self.control_timer.failed = true;
-                    }
-                    if let Some(timer) = self
-                        .timers
-                        .iter_mut()
-                        .find(|timer| timer.context == context)
-                    {
-                        timer.failed = true;
-                    }
+                    self.forwarding.worker_failed(
+                        &context,
+                        std::iter::once(&mut self.control_timer).chain(&mut self.timers),
+                    );
                     events.push(MainEvent::WorkerFailed {
                         context,
                         generation,
@@ -343,7 +328,10 @@ impl MainForwarder {
         if let Some(pending) = &mut self.pending {
             match candidate_ready(pending) {
                 Ok(true) if self.pending_controls.is_none() => {
-                    let mesh = self.mesh.replacement(pending.gateway.projection())?;
+                    let mesh = self
+                        .forwarding
+                        .mesh
+                        .replacement(pending.gateway.projection())?;
                     // A failed worker has no session to inherit. A newly
                     // committed revision may activate its prepared replacement;
                     // mere worker failure never triggers an automatic restart.
@@ -359,10 +347,10 @@ impl MainForwarder {
                         Ok(()) => {
                             self.pending = None;
                             self.active.remaining = 0;
-                            self.mesh = mesh;
-                            self.egress.configure(&self.active.gateway);
+                            self.forwarding.mesh = mesh;
+                            self.forwarding.egress.configure(&self.active.gateway);
                             self.outgoing.clear();
-                            self.dns.reset();
+                            self.forwarding.dns.reset();
                             self.timers = timers(&self.active.gateway, true);
                             self.service_peers =
                                 service_peers(self.active.gateway.projection(), &self.socket);
@@ -396,15 +384,8 @@ impl MainForwarder {
                 Err(_) => return Err("invalid main API peer configuration"),
             }
         }
-        self.ingress_first = !self.ingress_first;
-        if self.ingress_first {
-            receive(
-                &self.socket,
-                &mut self.active.gateway,
-                self.buffer.as_mut(),
-                &mut self.incoming,
-            )?;
-        }
+        self.forwarding
+            .begin_turn(&self.socket, &mut self.active.gateway)?;
         for _ in 0..BATCH {
             let Some((peer, bytes, deadline)) = self.outgoing.front() else {
                 break;
@@ -439,28 +420,25 @@ impl MainForwarder {
             }
             self.outgoing.pop_front();
         }
-        self.egress.poll(&mut self.active.gateway);
-        self.mesh.poll(
-            &mut self.active.gateway,
+        self.forwarding.finish_turn(
             &self.socket,
-            self.started.elapsed(),
-        );
-        self.dns
-            .poll(&mut self.active.gateway, self.started.elapsed());
-        self.control_timer
-            .tick(&mut self.active.gateway, Instant::now());
-        for timer in &mut self.timers {
-            timer.tick(&mut self.active.gateway, Instant::now());
-        }
-        if !self.ingress_first {
-            receive(
-                &self.socket,
-                &mut self.active.gateway,
-                self.buffer.as_mut(),
-                &mut self.incoming,
-            )?;
-        }
+            &mut self.active.gateway,
+            self.started,
+            std::iter::once(&mut self.control_timer).chain(&mut self.timers),
+        )?;
         Ok(events)
+    }
+    pub fn wait_for_broadcast(&self, maximum: Duration) -> Result<bool, &'static str> {
+        if !self.active.gateway.has_broadcast_jobs() {
+            return Ok(false);
+        }
+        if !self.active.gateway.has_pending_broadcast() {
+            self.active
+                .gateway
+                .wait_for_activity(&[], maximum)
+                .map_err(|_| "cannot wait for main forwarding worker")?;
+        }
+        Ok(true)
     }
 }
 fn candidate_ready(candidate: &mut Candidate) -> Result<bool, &'static str> {

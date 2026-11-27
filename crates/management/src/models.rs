@@ -2,11 +2,18 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
-use wgfeel_core::{ClientDevice, ClientId, DevicePublicKey, NodeId, TrafficMode};
+use wgfeel_core::{ClientId, DeviceId, DeviceMetadata, DevicePublicKey, NodeId, TrafficMode};
+
+fn default_broadcast() -> bool {
+    true
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AddUser {
+    /// Default directed broadcast policy inherited by devices.
+    #[serde(default = "default_broadcast")]
+    pub broadcast: bool,
     /// Display name. The server assigns the user's ID and network.
     pub name: String,
 }
@@ -14,6 +21,8 @@ pub(super) struct AddUser {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AddDevice {
+    /// Override the user's directed broadcast policy. Null inherits it.
+    pub broadcast: Option<bool>,
     /// Display name used when provisioning this device.
     pub name: String,
     /// Optional description shown in the device's metadata.
@@ -147,11 +156,47 @@ pub(super) struct User<'a> {
     pub name: &'a str,
     /// Whether traffic for this user's network is suspended.
     pub suspended: bool,
-    pub devices: &'a [ClientDevice],
+    pub broadcast: bool,
+    pub devices: Vec<DeviceView<'a>>,
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct Devices<'a> {
-    pub devices: &'a [ClientDevice],
+    pub devices: Vec<DeviceView<'a>>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(super) struct DeviceView<'a> {
+    pub id: &'a DeviceId,
+    pub metadata: &'a DeviceMetadata,
+    /// Null when the device exists only in the catalog.
+    pub registration: Option<DeviceBroadcast>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UserBroadcast {
+    pub broadcast: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(super) struct DeviceBroadcast {
+    pub broadcast: Option<bool>,
+    pub effective_broadcast: bool,
+}
+
+/// Omitting the setting is a malformed replacement. Explicit null selects inheritance.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SetDeviceBroadcast {
+    #[serde(deserialize_with = "required_broadcast")]
+    #[schemars(schema_with = "nullable_boolean")]
+    pub broadcast: Option<bool>,
+}
+fn required_broadcast<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<bool>, D::Error> {
+    Option::deserialize(de)
+}
+fn nullable_boolean(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":["boolean","null"]})
 }
 
 #[derive(Serialize, JsonSchema)]

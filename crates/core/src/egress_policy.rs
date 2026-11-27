@@ -281,6 +281,7 @@ impl EgressPolicy {
 pub enum Destination {
     Drop,
     InternalDns,
+    Broadcast,
     Device(Endpoint),
     Egress {
         egress: EgressId,
@@ -549,6 +550,16 @@ impl GatewayProjection {
         }
         if is_dns_address(dst) {
             return Destination::InternalDns;
+        }
+        if is_internal_broadcast_ipv4(dst) {
+            return if self.broadcast_enabled(source) {
+                Destination::Broadcast
+            } else {
+                Destination::Drop
+            };
+        }
+        if dst.is_multicast() || dst == IpAddr::V4(std::net::Ipv4Addr::BROADCAST) {
+            return Destination::Drop;
         }
         match self.config().resolve_destination(source, dst) {
             Ok(target) => {

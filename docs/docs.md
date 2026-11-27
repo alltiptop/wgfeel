@@ -44,6 +44,10 @@ Administrative commands connect to the installed main Unix socket automatically.
 | [user list](#wgfeel-user-list) | List users with their IDs, names, device counts and suspension status, then allow interactive selection |
 | [user show](#wgfeel-user-show) | Open a user's details and device menu |
 | [user add](#wgfeel-user-add) | Create a user and its isolated network, ask for the first device name, then open the user's menu |
+| [user broadcast show](#wgfeel-user-broadcast-show) | Show the user's default directed broadcast policy |
+| [user broadcast set](#wgfeel-user-broadcast-set) | Set the default directed broadcast policy for this user's devices |
+| [device broadcast show](#wgfeel-device-broadcast-show) | Show the device override and its effective directed broadcast policy |
+| [device broadcast set](#wgfeel-device-broadcast-set) | Set the device's send and receive policy |
 | [user remove](#wgfeel-user-remove) | Display the selected user and ask for confirmation before deleting the user and its devices |
 | [device add](#wgfeel-device-add) | Create a device in the selected user's network, then open its details |
 | [device show](#wgfeel-device-show) | Open device details, including its WireGuard client configuration |
@@ -372,7 +376,7 @@ wgfeel user show
 ### wgfeel user add
 
 ```text
-wgfeel user add [NAME]
+wgfeel user add [NAME] [--broadcast on|off]
 ```
 
 Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
@@ -382,11 +386,84 @@ Accepts the [connection options](#connection-options).
 | Argument / option | Description |
 | --- | --- |
 | `NAME` | Friendly user name; quote names containing spaces. |
+| `--broadcast on\|off` | Default directed broadcast policy. Defaults to on. |
 
 Example:
 
 ```sh
 wgfeel user add Alice
+```
+
+<a id="wgfeel-user-broadcast-show"></a>
+
+### wgfeel user broadcast show
+
+```text
+wgfeel user broadcast show [ID]
+```
+
+Show the user's default directed broadcast policy.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel user broadcast show
+```
+
+<a id="wgfeel-user-broadcast-set"></a>
+
+### wgfeel user broadcast set
+
+```text
+wgfeel user broadcast set ID on|off
+```
+
+Set the default directed broadcast policy for this user's devices.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel user broadcast set USER_ID off
+```
+
+<a id="wgfeel-device-broadcast-show"></a>
+
+### wgfeel device broadcast show
+
+```text
+wgfeel device broadcast show [ID]
+```
+
+Show the device override and its effective directed broadcast policy.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel device broadcast show
+```
+
+<a id="wgfeel-device-broadcast-set"></a>
+
+### wgfeel device broadcast set
+
+```text
+wgfeel device broadcast set ID on|off|inherit
+```
+
+Set the device's send and receive policy. Choose inherit to follow the user default.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel device broadcast set DEVICE_ID inherit
 ```
 
 <a id="wgfeel-user-remove"></a>
@@ -416,7 +493,7 @@ wgfeel user remove
 ### wgfeel device add
 
 ```text
-wgfeel device add [--user ID] [--name NAME]
+wgfeel device add [--user ID] [--name NAME] [--broadcast on|off|inherit]
 ```
 
 Create a device in the selected user's network, then open its details. Ask for any omitted user or device name. Import the generated WireGuard configuration into the device's native client.
@@ -426,6 +503,7 @@ Accepts the [connection options](#connection-options).
 | Argument / option | Description |
 | --- | --- |
 | `--user ID` | Owner's user ID; otherwise choose interactively. |
+| `--broadcast on\|off\|inherit` | Override the user default. Defaults to inherit. |
 | `--name NAME` | Friendly device name; otherwise enter it interactively. |
 
 Example:

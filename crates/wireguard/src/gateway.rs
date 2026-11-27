@@ -67,7 +67,10 @@ pub struct Gateway {
     // None marks a failed invariant. All engines and routing state are then
     // dropped; callers must reconstruct the gateway from trusted configuration.
     router: Option<Router>,
-    projection: Option<GatewayProjection>,
+    pub(crate) projection: Option<GatewayProjection>,
+    pub(crate) broadcast_jobs: std::collections::VecDeque<crate::forwarding::LocalBroadcast>,
+    pub(crate) broadcast_first: bool,
+    pub(crate) broadcast_limits: crate::broadcast::Limits,
     plaintext_pool: PacketBufPool<{ crate::MAX_PLAINTEXT_SIZE }>,
 }
 impl fmt::Debug for Gateway {
@@ -242,6 +245,9 @@ impl Gateway {
             indices,
             router: Some(Router::new(routes)?),
             projection: None,
+            broadcast_jobs: Default::default(),
+            broadcast_first: false,
+            broadcast_limits: Default::default(),
             plaintext_pool: PacketBufPool::new(1),
         })
     }
@@ -665,6 +671,7 @@ impl Gateway {
         // bad datagram. Drop all leases, keys and sessions before accepting any
         // further work; reconstructing from trusted config is required.
         self.router = None;
+        self.broadcast_jobs.clear();
         self.contexts.clear();
     }
 }

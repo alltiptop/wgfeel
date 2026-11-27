@@ -183,6 +183,29 @@ fn uuid(value: &str) {
     assert!(b"89ab".contains(&value.as_bytes()[19]));
 }
 #[test]
+fn adding_a_user_without_a_gateway_reports_how_to_finish_device_setup() {
+    let install = Installation::new();
+    let mut out = Vec::new();
+    let error = run_with_io(
+        &["user".into(), "add".into(), "Alice".into()],
+        &install.path,
+        &mut io::Cursor::new("laptop\n"),
+        &mut out,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error, "Management rejected request");
+    let users = install.users();
+    let users = users["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    let id = users[0]["id"].as_str().unwrap();
+    assert!(users[0]["devices"].as_array().unwrap().is_empty());
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("gateway_required"));
+    assert!(out.contains(&format!("wgfeel user show {id}")));
+    assert!(out.contains(&format!("wgfeel device add --user {id}")));
+}
+#[test]
 fn installed_menus_generate_ids_show_native_config_and_confirm_every_deletion() {
     let installation = Installation::new();
     installation.gateway();
@@ -205,7 +228,7 @@ fn installed_menus_generate_ids_show_native_config_and_confirm_every_deletion() 
     assert!(screen.contains("1. Alice, 1 devices"));
     assert!(screen.contains("1. laptop"));
     assert!(screen.contains("[Interface]\nPrivateKey = "));
-    assert!(screen.contains("Address = 10.203.0.2/32, fd77:77::2/128"));
+    assert!(screen.contains("Address = 10.203.0.2/16, fd77:77::2/128"));
     assert!(screen.contains("Endpoint = 192.0.2.2:51821"));
     assert!(
         installation
@@ -412,5 +435,60 @@ fn installed_egress_commands_roundtrip_real_placement_and_grants() {
     assert_eq!(
         install.users()["users"][0]["egresses"],
         serde_json::json!([])
+    );
+}
+
+#[test]
+fn broadcast_commands_and_menus_share_stored_and_inherited_settings() {
+    let installation = Installation::new();
+    installation.gateway();
+    let screen = installation
+        .ui(
+            &["user", "add", "Alice", "--broadcast", "off"],
+            "laptop\n0\n",
+        )
+        .unwrap();
+    assert!(screen.contains("Broadcast: off"));
+    let data = installation.users();
+    let user = data["users"][0]["id"].as_str().unwrap();
+    let first = data["users"][0]["devices"][0]["id"].as_str().unwrap();
+    assert!(
+        installation
+            .ui(&["device", "broadcast", "show", first], "")
+            .unwrap()
+            .contains("inherit (currently off)")
+    );
+    assert!(
+        installation
+            .ui(&["user", "broadcast", "set", user, "on"], "")
+            .unwrap()
+            .contains("Broadcast: on")
+    );
+    let screen = installation
+        .ui(&["device", "broadcast", "set", first, "inherit"], "")
+        .unwrap();
+    assert!(screen.contains("inherit (currently on)") && !screen.contains("PrivateKey"));
+    let screen = installation
+        .ui(
+            &[
+                "device",
+                "add",
+                "--user",
+                user,
+                "--name",
+                "phone",
+                "--broadcast",
+                "off",
+            ],
+            "2\n2\n0\n",
+        )
+        .unwrap();
+    assert!(screen.contains("Broadcast: off") && screen.contains("Broadcast: on"));
+    let screen = installation.ui(&["user", "show", user], "6\n0\n").unwrap();
+    assert!(screen.contains("6. broadcast") && screen.contains("Broadcast: off"));
+    assert!(
+        installation
+            .ui(&["user", "broadcast", "set", user, "inherit"], "")
+            .is_err()
     );
 }

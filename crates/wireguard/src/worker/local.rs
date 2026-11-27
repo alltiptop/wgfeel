@@ -1,6 +1,9 @@
+mod broadcast_jobs;
+
 use super::{
     RequestId, Submission, WorkerError, WorkerEvent, WorkerGateway, WorkerInfo, WorkerOptions,
 };
+use crate::broadcast;
 use crate::{
     ContextId, DatagramEvent, ForwardError, Limits, PacketBytes, PeerId, PrivateKey,
     WireGuardError,
@@ -9,6 +12,7 @@ use crate::{
     mesh::{Direction, ExternalTraffic, MeshTraffic},
     nat::{NatAction, NatBinding, NatTable},
 };
+use std::collections::VecDeque;
 use std::{
     fmt,
     net::SocketAddr,
@@ -115,6 +119,7 @@ pub enum LocalEvent {
         packet: PacketBytes,
     },
     MeshOutput {
+        provenance: Option<WorkerLease>,
         network: NetworkId,
         peer: NodeId,
         packet: PacketBytes,
@@ -159,6 +164,25 @@ pub enum LocalEvent {
     },
 }
 
+/// Fences broadcast mesh actions by worker incarnation and policy revision.
+#[derive(Debug, Clone)]
+pub struct WorkerLease {
+    context: ContextId,
+    generation: u64,
+    revision: u64,
+}
+
+#[derive(Debug)]
+struct BroadcastJob {
+    outer: Option<u64>,
+    origin: RequestId,
+    revision: u64,
+    scan: broadcast::Scan,
+    len: usize,
+    last: bool,
+    outputs: VecDeque<(EncryptedDatagram, Option<crate::mesh::BroadcastTraffic>)>,
+}
+
 #[derive(Debug, Clone)]
 struct Origin {
     context: ContextId,
@@ -189,7 +213,10 @@ impl DnsSource {
 enum Stage {
     Receive,
     ProviderReceive,
+    Broadcast,
+    BroadcastMesh(WorkerLease, PeerId),
     ReceiveMesh {
+        outer: Option<u64>,
         network: NetworkId,
         origin: NodeId,
         traffic: Option<MeshTraffic>,
@@ -212,6 +239,7 @@ impl Stage {
     /// preserving raw crypto receives, timers and non-relay control operations.
     fn across_revision(self, context: &ContextId) -> Self {
         match self {
+            Self::Broadcast | Self::BroadcastMesh(..) => Self::Cancelled(context.clone(), None),
             Self::ProviderReceive => Self::Cancelled(context.clone(), Some(PeerId::Provider)),
             Self::Control(peer) | Self::Timer(peer)
                 if matches!(context, ContextId::External(_)) =>
@@ -241,6 +269,8 @@ pub struct LocalGateway {
     projection: GatewayProjection,
     raw: WorkerGateway,
     nat: NatTable,
+    broadcast_jobs: VecDeque<BroadcastJob>,
+    broadcast_limits: broadcast::Limits,
     provider_keys: std::collections::BTreeMap<EgressId, KeyFingerprint>,
     path_mtu: PathMtu,
     // Exactly one record per pending raw request, at most one per worker.
@@ -283,6 +313,22 @@ impl GatewayHandoff<'_> {
             flight.request.generation = *generation;
             flight.stage = flight.stage.across_revision(&flight.request.context);
             self.next.flights.push(flight);
+        }
+        let same_authority = self.next.projection.management_id()
+            == self.previous.projection.management_id()
+            && self.next.management_key == self.previous.management_key;
+        self.next.broadcast_limits = std::mem::take(&mut self.previous.broadcast_limits);
+        self.next
+            .broadcast_limits
+            .update(&self.next.projection, same_authority);
+        for mut job in self.previous.broadcast_jobs.drain(..) {
+            if let Some((_, generation)) = inherited.iter().find(|(c, _)| c == &job.origin.context)
+            {
+                job.origin.generation = *generation;
+                job.scan.expires = Instant::now();
+                job.outputs.clear();
+                self.next.broadcast_jobs.push_back(job);
+            }
         }
         self.next.nat = std::mem::take(&mut self.previous.nat);
         self.next.path_mtu = std::mem::take(&mut self.previous.path_mtu);
@@ -437,6 +483,8 @@ impl LocalGateway {
             projection: projection.clone(),
             raw,
             nat: NatTable::default(),
+            broadcast_jobs: Default::default(),
+            broadcast_limits: Default::default(),
             provider_keys: Default::default(),
             path_mtu: Default::default(),
             flights,
@@ -630,6 +678,8 @@ impl LocalGateway {
             projection: projection.clone(),
             raw,
             nat: NatTable::default(),
+            broadcast_jobs: Default::default(),
+            broadcast_limits: Default::default(),
             provider_keys,
             path_mtu: Default::default(),
             flights,
@@ -868,7 +918,16 @@ impl LocalGateway {
         Ok(())
     }
     pub fn send_mesh(&mut self, node: &NodeId, packet: &[u8]) -> Result<(), LocalError> {
-        if self.projection.is_revoked()
+        self.send_mesh_scoped(node, packet, None)
+    }
+    pub fn send_mesh_scoped(
+        &mut self,
+        node: &NodeId,
+        packet: &[u8],
+        lease: Option<&WorkerLease>,
+    ) -> Result<(), LocalError> {
+        if lease.is_some_and(|id| !self.lease_active(id))
+            || self.projection.is_revoked()
             || node == self.projection.recipient()
             || !self
                 .projection
@@ -885,7 +944,10 @@ impl LocalGateway {
             .map_err(LocalError::Worker)?;
         self.flights.push(Flight {
             request,
-            stage: Stage::Control(peer),
+            stage: match lease {
+                Some(lease) => Stage::BroadcastMesh(lease.clone(), peer),
+                None => Stage::Control(peer),
+            },
         });
         Ok(())
     }
@@ -930,6 +992,11 @@ impl LocalGateway {
                 self.flights.push(Flight {
                     request,
                     stage: Stage::ReceiveMesh {
+                        outer: if matches!(traffic, Some(MeshTraffic::Broadcast(_))) {
+                            self.raw.incarnation(&ContextId::Gateway)
+                        } else {
+                            None
+                        },
                         network: network.clone(),
                         origin: origin.clone(),
                         traffic,
@@ -943,6 +1010,7 @@ impl LocalGateway {
                 packet,
                 ..
             }) if actual == context && sender == peer => Ok(Some(LocalEvent::MeshOutput {
+                provenance: None,
                 network: network.clone(),
                 peer: origin.clone(),
                 packet,
@@ -1008,7 +1076,17 @@ impl LocalGateway {
                         .find(|network| network.id() == id)
                         .map(wgfeel_core::Network::devices)
                 }
-                devices(&self.projection, tenant.network()) == devices(next, tenant.network())
+                match (
+                    devices(&self.projection, tenant.network()),
+                    devices(next, tenant.network()),
+                ) {
+                    (Some(a), Some(b)) => {
+                        a.len() == b.len()
+                            && a.iter().zip(b).all(|(a, b)| a.same_worker_registration(b))
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
             })
     }
     pub fn replace_projection(&mut self, next: &GatewayProjection) -> Result<(), LocalError> {
@@ -1023,6 +1101,11 @@ impl LocalGateway {
                 Stage::Cancelled(flight.request.context.clone(), None),
             );
             flight.stage = stage.across_revision(&flight.request.context);
+        }
+        self.broadcast_limits.update(next, true);
+        for job in &mut self.broadcast_jobs {
+            job.outputs.clear();
+            job.scan.expires = Instant::now();
         }
         retain_nat(&mut self.nat, &self.projection, next);
         self.projection = next.clone();
@@ -1120,7 +1203,36 @@ impl LocalGateway {
     /// Drives bounded worker I/O and at most one forwarding transition. Busy or
     /// unavailable destinations drop the packet; no deferred replay is retained.
     pub fn poll(&mut self) -> Option<LocalEvent> {
-        match self.raw.poll()? {
+        let result = self.poll_ordinary();
+        if result.is_none() {
+            self.advance_broadcast();
+        }
+        result
+    }
+    pub fn poll_ordinary(&mut self) -> Option<LocalEvent> {
+        let event = self.raw.poll();
+        // A completion can free the only tenant-worker slot. Release expired parked
+        // plaintext before another receive or timer can claim it.
+        self.progress_broadcast(true);
+        let Some(event) = event else {
+            return self.drain_broadcast();
+        };
+        match event {
+            WorkerEvent::BroadcastCompleted { request, results } => {
+                let slot = self.flights.iter().position(|f| f.request == request)?;
+                let flight = self.flights.swap_remove(slot);
+                if matches!(flight.stage, Stage::Broadcast)
+                    && let Some(job) = self.broadcast_jobs.iter_mut().find(|j| {
+                        j.origin.context == request.context
+                            && j.origin.generation == request.generation
+                            && j.revision == self.projection.generation()
+                            && j.scan.expires > Instant::now()
+                    })
+                {
+                    job.outputs = results.into();
+                }
+                self.drain_broadcast()
+            }
             WorkerEvent::Ready {
                 context,
                 generation,
@@ -1133,6 +1245,8 @@ impl LocalGateway {
                 generation,
                 reason,
             } => {
+                self.broadcast_jobs
+                    .retain(|j| j.origin.context != context || j.origin.generation != generation);
                 if let ContextId::External(id) = &context {
                     self.nat.discard_egress(id);
                     self.path_mtu.clear(id);
@@ -1160,6 +1274,14 @@ impl LocalGateway {
                 };
                 let flight = self.flights.swap_remove(slot);
                 match flight.stage {
+                    Stage::Broadcast => None,
+                    Stage::BroadcastMesh(lease, peer) => {
+                        if self.lease_active(&lease) {
+                            emit(request.context, Some(peer), result, None)
+                        } else {
+                            None
+                        }
+                    }
                     Stage::ProviderReceive => match result {
                         Ok(Some(DatagramEvent::Plaintext {
                             context: ContextId::External(id),
@@ -1243,7 +1365,15 @@ impl LocalGateway {
                         network,
                         origin,
                         traffic,
+                        outer,
                     } => {
+                        if matches!(traffic, Some(MeshTraffic::Broadcast(_)))
+                            && outer.is_none_or(|g| {
+                                !self.raw.generation_is_active(&ContextId::Gateway, g)
+                            })
+                        {
+                            return None;
+                        }
                         let expected_context = ContextId::Tenant(network);
                         let expected_peer = PeerId::Gateway(origin);
                         match result {
@@ -1409,6 +1539,31 @@ impl LocalGateway {
         let ContextId::Tenant(network) = &context else {
             return None;
         };
+        if wgfeel_core::is_internal_broadcast_ipv4(dst) {
+            let (source, home) = match (&peer, &expected) {
+                (PeerId::Device(id), None) => (
+                    Endpoint::new(network.clone(), id.clone()),
+                    self.projection.recipient().clone(),
+                ),
+                (PeerId::Gateway(home), Some(MeshTraffic::Broadcast(label)))
+                    if label.source.network() == network
+                        && self.projection.broadcast_recipient(
+                            &label.source,
+                            &label.witness,
+                            home,
+                            self.projection.recipient(),
+                        ) =>
+                {
+                    (label.source.clone(), home.clone())
+                }
+                _ => return None,
+            };
+            self.start_broadcast(request, source, &home, packet);
+            return None;
+        }
+        if matches!(expected, Some(MeshTraffic::Broadcast(_))) {
+            return None;
+        }
         let external = match (&peer, &expected) {
             (PeerId::Gateway(sender), Some(MeshTraffic::External(label))) => {
                 if label.device.network() != network {
@@ -1458,11 +1613,29 @@ impl LocalGateway {
             }
             (PeerId::Device(id), None) => {
                 let endpoint = Endpoint::new(network.clone(), id.clone());
+                let classification = self.projection.classify_destination(&endpoint, dst);
+                if matches!(
+                    classification,
+                    Destination::Drop | Destination::Broadcast | Destination::InternalDns
+                ) {
+                    // Preserve the routing diagnostic while making a drop terminal.
+                    let reason = match self.projection.config().resolve_destination(&endpoint, dst)
+                    {
+                        Err(wgfeel_core::RouteError::UnknownDestination) => {
+                            ForwardError::UnknownDestination
+                        }
+                        Err(wgfeel_core::RouteError::AmbiguousDestination) => {
+                            ForwardError::AmbiguousDestination
+                        }
+                        _ => ForwardError::Denied,
+                    };
+                    return Some(dropped(context, Some(peer), LocalError::Forward(reason)));
+                }
                 if let Destination::Egress {
                     egress,
                     node,
                     prefix,
-                } = self.projection.classify_destination(&endpoint, dst)
+                } = classification
                 {
                     let device = self.projection.device(&endpoint)?;
                     if !device.addresses().contains(&src)
@@ -1549,6 +1722,20 @@ impl LocalGateway {
         )
     }
 
+    pub fn lease_active(&self, lease: &WorkerLease) -> bool {
+        lease.revision == self.projection.generation()
+            && self
+                .raw
+                .generation_is_active(&lease.context, lease.generation)
+    }
+    pub fn worker_lease(&self, context: &ContextId) -> Option<WorkerLease> {
+        let generation = self.raw.incarnation(context)?;
+        Some(WorkerLease {
+            context: context.clone(),
+            generation,
+            revision: self.projection.generation(),
+        })
+    }
     fn nat_output(
         &mut self,
         origin: Origin,
@@ -1704,6 +1891,7 @@ fn emit(
                 packet,
                 ..
             }) => LocalEvent::MeshOutput {
+                provenance: None,
                 network,
                 peer,
                 packet,
@@ -1967,6 +2155,7 @@ mod capability_tests {
         ));
         assert!(matches!(
             Stage::ReceiveMesh {
+                outer: None,
                 network: NetworkId::new("alice").unwrap(),
                 origin: NodeId::new("remote").unwrap(),
                 traffic: None,

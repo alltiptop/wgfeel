@@ -207,6 +207,7 @@ impl From<ManagementChangeError> for ApiError {
 fn change_error(error: ManagementChangeError) -> ApiError {
     use ManagementChangeError::*;
     match error {
+        DeviceUnassigned => ApiError(409, "device_unassigned"),
         RevisionConflict => ApiError(412, "revision_conflict"),
         UnknownClient | UnknownDevice | UnknownGateway | UnknownEgress => {
             ApiError(404, "not_found")

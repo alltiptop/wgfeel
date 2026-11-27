@@ -300,6 +300,12 @@
             },
             "type": "array"
           },
+          "broadcast": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "gateway": {
             "description": "Entry node assigned to the device.",
             "type": [
@@ -325,6 +331,24 @@
           "id",
           "public_key",
           "addresses"
+        ],
+        "type": "object"
+      },
+      "DeviceBroadcast": {
+        "properties": {
+          "broadcast": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "effective_broadcast": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "broadcast",
+          "effective_broadcast"
         ],
         "type": "object"
       },
@@ -362,11 +386,38 @@
         "minItems": 32,
         "type": "array"
       },
+      "DeviceView": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/DeviceMetadata"
+          },
+          "registration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceBroadcast"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null when the device exists only in the catalog."
+          }
+        },
+        "required": [
+          "id",
+          "metadata",
+          "registration"
+        ],
+        "type": "object"
+      },
       "Devices": {
         "properties": {
           "devices": {
             "items": {
-              "$ref": "#/components/schemas/ClientDevice"
+              "$ref": "#/components/schemas/DeviceView"
             },
             "type": "array"
           }
@@ -996,6 +1047,9 @@
       },
       "Network": {
         "properties": {
+          "broadcast": {
+            "type": "boolean"
+          },
           "devices": {
             "items": {
               "$ref": "#/components/schemas/Device"
@@ -1112,9 +1166,12 @@
       },
       "User": {
         "properties": {
+          "broadcast": {
+            "type": "boolean"
+          },
           "devices": {
             "items": {
-              "$ref": "#/components/schemas/ClientDevice"
+              "$ref": "#/components/schemas/DeviceView"
             },
             "type": "array"
           },
@@ -1140,7 +1197,20 @@
           "id",
           "name",
           "suspended",
+          "broadcast",
           "devices"
+        ],
+        "type": "object"
+      },
+      "UserBroadcast": {
+        "additionalProperties": false,
+        "properties": {
+          "broadcast": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "broadcast"
         ],
         "type": "object"
       },
@@ -2959,6 +3029,11 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "broadcast": {
+                    "default": true,
+                    "description": "Default directed broadcast policy inherited by devices.",
+                    "type": "boolean"
+                  },
                   "name": {
                     "description": "Display name. The server assigns the user's ID and network.",
                     "type": "string"
@@ -3207,6 +3282,189 @@
         "summary": "Get one user and their devices."
       }
     },
+    "/api/v1/users/{user}/broadcast": {
+      "get": {
+        "operationId": "get_user_broadcast",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserBroadcast"
+                }
+              }
+            },
+            "description": "Read the user's default directed broadcast policy.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Read the user's default directed broadcast policy."
+      },
+      "put": {
+        "operationId": "set_user_broadcast",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "broadcast": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "broadcast"
+                ],
+                "title": "UserBroadcast",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserBroadcast"
+                }
+              }
+            },
+            "description": "Set the user's default directed broadcast policy.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Set the user's default directed broadcast policy."
+      }
+    },
     "/api/v1/users/{user}/devices": {
       "get": {
         "operationId": "list_devices",
@@ -3317,6 +3575,13 @@
                       "type": "string"
                     },
                     "type": "array"
+                  },
+                  "broadcast": {
+                    "description": "Override the user's directed broadcast policy. Null inherits it.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "description": {
                     "description": "Optional description shown in the device's metadata.",
@@ -3560,7 +3825,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ClientDevice"
+                  "$ref": "#/components/schemas/DeviceView"
                 }
               }
             },
@@ -3608,6 +3873,219 @@
           }
         },
         "summary": "Get the device ID and metadata."
+      }
+    },
+    "/api/v1/users/{user}/devices/{device}/broadcast": {
+      "get": {
+        "operationId": "get_device_broadcast",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceBroadcast"
+                }
+              }
+            },
+            "description": "Read the device override and effective directed broadcast policy.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Read the device override and effective directed broadcast policy."
+      },
+      "put": {
+        "operationId": "set_device_broadcast",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Omitting the setting is a malformed replacement. Explicit null selects inheritance.",
+                "properties": {
+                  "broadcast": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "broadcast"
+                ],
+                "title": "SetDeviceBroadcast",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceBroadcast"
+                }
+              }
+            },
+            "description": "Set the device override. Null restores inheritance.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Set the device override. Null restores inheritance."
       }
     },
     "/api/v1/users/{user}/devices/{device}/config": {

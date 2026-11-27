@@ -31,6 +31,9 @@ fn delivery(state: &StoredManagement) -> Result<GatewayDelivery, &'static str> {
     GatewayDelivery::decode(&bytes).map_err(|_| "invalid main forwarding material")
 }
 impl Transport {
+    pub fn wait_for_broadcast(&self, max: std::time::Duration) -> Result<bool, &'static str> {
+        self.forwarding.wait_for_broadcast(max)
+    }
     pub(super) fn control_transport(&mut self) -> std::io::Result<wgfeel_wireguard::UdpTransport> {
         self.forwarding.control_transport()
     }

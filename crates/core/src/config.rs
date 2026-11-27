@@ -4,10 +4,15 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
+pub const INTERNAL_NETWORK_IPV4: Ipv4Addr = Ipv4Addr::new(10, 203, 0, 0);
+pub const INTERNAL_BROADCAST_IPV4: Ipv4Addr = Ipv4Addr::new(10, 203, 255, 255);
+pub fn is_internal_broadcast_ipv4(address: IpAddr) -> bool {
+    address == IpAddr::V4(INTERNAL_BROADCAST_IPV4)
+}
 pub const DNS_ZONE: &str = "feel.internal";
 pub const DNS_IPV4: Ipv4Addr = Ipv4Addr::new(10, 203, 0, 1);
 pub const DNS_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, 1);
@@ -21,6 +26,8 @@ pub struct Device {
     public_key: DevicePublicKey,
     /// Tunnel addresses assigned within this network.
     addresses: Vec<IpAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broadcast: Option<bool>,
     /// Entry node assigned to the device.
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<NodeId>,
@@ -46,7 +53,10 @@ impl Device {
                 || address.is_loopback()
                 || address.is_multicast()
                 || match address {
-                    IpAddr::V4(v4) => v4.is_broadcast(),
+                    IpAddr::V4(v4) => {
+                        v4.is_broadcast()
+                            || matches!(*v4, INTERNAL_NETWORK_IPV4 | INTERNAL_BROADCAST_IPV4)
+                    }
                     IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some(),
                 }
             {
@@ -57,12 +67,42 @@ impl Device {
             id,
             public_key,
             addresses,
+            broadcast: None,
             gateway: None,
             hostname: None,
         })
     }
     pub fn id(&self) -> &DeviceId {
         &self.id
+    }
+    /// Worker sessions survive a change to the broadcast policy alone.
+    pub fn same_worker_registration(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            public_key,
+            addresses,
+            gateway,
+            hostname,
+            broadcast: _,
+        } = self;
+        id == &other.id
+            && public_key == &other.public_key
+            && addresses == &other.addresses
+            && gateway == &other.gateway
+            && hostname == &other.hostname
+    }
+    pub fn broadcast(&self) -> Option<bool> {
+        self.broadcast
+    }
+    pub fn with_broadcast(mut self, setting: Option<bool>) -> Self {
+        self.broadcast = setting;
+        self
+    }
+    pub fn internal_ipv4(&self) -> Option<Ipv4Addr> {
+        self.addresses.iter().find_map(|address| match address {
+            IpAddr::V4(ip) if crate::IpPrefix::internal_v4().contains(*address) => Some(*ip),
+            _ => None,
+        })
     }
     pub fn with_gateway(mut self, gateway: Option<NodeId>) -> Self {
         self.gateway = gateway;
@@ -104,8 +144,13 @@ pub struct Network {
     devices: Vec<Device>,
     #[serde(skip_serializing_if = "is_false")]
     private_lan: bool,
+    #[serde(skip_serializing_if = "is_true")]
+    broadcast: bool,
     #[serde(skip_serializing_if = "is_false")]
     suspended: bool,
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -139,9 +184,20 @@ impl Network {
         Ok(Self {
             id,
             devices,
+            broadcast: true,
             private_lan: false,
             suspended: false,
         })
+    }
+    pub fn broadcast(&self) -> bool {
+        self.broadcast
+    }
+    pub fn with_broadcast(mut self, enabled: bool) -> Self {
+        self.broadcast = enabled;
+        self
+    }
+    pub fn effective_broadcast(&self, device: &Device) -> bool {
+        device.broadcast().unwrap_or(self.broadcast)
     }
     pub fn with_private_lan(mut self, enabled: bool) -> Self {
         self.private_lan = enabled;
@@ -159,6 +215,7 @@ impl Network {
     }
     pub fn with_devices(&self, devices: Vec<Device>) -> Result<Self, DomainError> {
         Ok(Self::new(self.id.clone(), devices)?
+            .with_broadcast(self.broadcast)
             .with_private_lan(self.private_lan)
             .with_suspended(self.suspended))
     }
@@ -170,7 +227,7 @@ impl Network {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
 pub struct Endpoint {
     pub(crate) network: NetworkId,
     pub(crate) device: DeviceId,
@@ -205,9 +262,6 @@ impl Rule {
             destination,
             action,
         }
-    }
-    fn matches(&self, source: &Endpoint, destination: &Endpoint) -> bool {
-        self.source == *source && self.destination == *destination
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -276,6 +330,8 @@ pub struct Config {
     pub(crate) generation: u64,
     pub(crate) networks: Vec<Network>,
     pub(crate) policy: Policy,
+    registrations: HashMap<Endpoint, (usize, usize)>,
+    rules: HashMap<Endpoint, HashMap<Endpoint, Action>>,
 }
 impl Config {
     pub fn new(
@@ -303,7 +359,42 @@ impl Config {
                 return Err(DomainError::DuplicateNetworkId);
             }
         }
+        let registrations = networks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, n)| {
+                n.devices
+                    .iter()
+                    .enumerate()
+                    .map(move |(j, d)| (Endpoint::new(n.id.clone(), d.id.clone()), (i, j)))
+            })
+            .collect();
+        // Compile exact directional rules once. A deny always wins, regardless of wire order.
+        let mut rules: HashMap<_, HashMap<_, _>> = HashMap::new();
+        for g in &policy.grants {
+            rules
+                .entry(g.source.clone())
+                .or_default()
+                .insert(g.destination.clone(), Action::Allow);
+        }
+        for r in policy.local_rules.iter().chain(
+            policy
+                .global_rules
+                .iter()
+                .filter(|r| r.action == Action::Deny),
+        ) {
+            let action = rules
+                .entry(r.source.clone())
+                .or_default()
+                .entry(r.destination.clone())
+                .or_insert(r.action);
+            if r.action == Action::Deny {
+                *action = Action::Deny;
+            }
+        }
         let config = Self {
+            registrations,
+            rules,
             generation,
             networks,
             policy,
@@ -451,10 +542,13 @@ impl Config {
             Policy::new(global_rules, local_rules, grants),
         )
     }
+    pub(crate) fn registration(&self, endpoint: &Endpoint) -> Option<(&Network, &Device)> {
+        let &(i, j) = self.registrations.get(endpoint)?;
+        let net = &self.networks[i];
+        Some((net, &net.devices[j]))
+    }
     fn endpoint_network(&self, endpoint: &Endpoint) -> Option<&Network> {
-        self.networks
-            .iter()
-            .find(|n| n.id == endpoint.network && n.devices.iter().any(|d| d.id == endpoint.device))
+        self.registration(endpoint).map(|(net, _)| net)
     }
     fn validate_policy(&self) -> Result<(), DomainError> {
         for rule in self
@@ -502,46 +596,26 @@ impl Config {
     /// Configuration-level authorization only. Packet authentication and filtering
     /// must establish these identities and enforce IP/protocol/port rules later.
     pub fn decision(&self, source: &Endpoint, destination: &Endpoint) -> Action {
-        if self.endpoint_network(source).is_none_or(Network::suspended)
+        let Some(network) = self.endpoint_network(source) else {
+            return Action::Deny;
+        };
+        if network.suspended()
             || self
                 .endpoint_network(destination)
                 .is_none_or(Network::suspended)
-            || self
-                .policy
-                .global_rules
-                .iter()
-                .any(|r| r.action == Action::Deny && r.matches(source, destination))
         {
             return Action::Deny;
         }
-        if source.network == destination.network {
-            if self
-                .policy
-                .local_rules
-                .iter()
-                .any(|r| r.action == Action::Deny && r.matches(source, destination))
-            {
-                return Action::Deny;
-            }
-            if self
-                .endpoint_network(source)
-                .is_some_and(Network::private_lan)
-                || self
-                    .policy
-                    .local_rules
-                    .iter()
-                    .any(|r| r.action == Action::Allow && r.matches(source, destination))
-            {
-                return Action::Allow;
-            }
-        } else if self
-            .policy
-            .grants
-            .iter()
-            .any(|g| g.source == *source && g.destination == *destination)
-        {
-            return Action::Allow;
-        }
-        Action::Deny
+        self.rules
+            .get(source)
+            .and_then(|rules| rules.get(destination))
+            .copied()
+            .unwrap_or_else(|| {
+                if source.network == destination.network && network.private_lan() {
+                    Action::Allow
+                } else {
+                    Action::Deny
+                }
+            })
     }
 }

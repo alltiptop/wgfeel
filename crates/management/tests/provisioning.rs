@@ -137,7 +137,7 @@ fn private_lan_provisioning_exports_persistent_native_configs_without_leaking_de
     let text = std::str::from_utf8(&exported.body).unwrap();
     assert!(text.contains("[Interface]\nPrivateKey = "));
     assert!(text.contains("Endpoint = 192.0.2.1:51820"));
-    assert!(text.contains("Address = 10.203.0.2/32, fd77:77::2/128\n"));
+    assert!(text.contains("Address = 10.203.0.2/16, fd77:77::2/128\n"));
     assert!(text.contains("# Split DNS: feel.internal via 10.203.0.1\n"));
     assert!(!text.lines().any(|line| line.starts_with("DNS =")));
     assert!(text.contains(&format!("# User: Alice ({alice})\n")));
@@ -150,7 +150,7 @@ fn private_lan_provisioning_exports_persistent_native_configs_without_leaking_de
     assert!(text.contains("# IPv4\nEndpoint = 192.0.2.1:51820\n"));
     assert!(text.contains("# IPv4\nEndpoint = 192.0.2.2:51820\n"));
     assert!(text.contains("# IPv4\n# Endpoint = 192.0.2.3:51820\n# IPv6\nEndpoint = [2001:db8::3]:51820\n# Endpoint = [2001:db8::4]:51821\n"));
-    for (index, address) in [(1, "10.203.0.3/32, fd77:77::3/128"), (3, "10.77.0.4/32")] {
+    for (index, address) in [(1, "10.203.0.3/16, fd77:77::3/128"), (3, "10.77.0.4/32")] {
         let response = get(
             &mut service,
             &format!("/api/v1/users/{alice}/devices/{}/config", devices[index]),

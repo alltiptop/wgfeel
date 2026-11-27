@@ -832,3 +832,159 @@ fn udp_local_entry_emits_nothing_for_denied_payload_then_forwards_allowed_reply(
     assert_eq!(source, server);
     fixture.peers[0].assert_plaintext(server, &buffer[..length], &decremented(&allowed));
 }
+
+fn discovery_fixture() -> Fixture {
+    let mut peers = Vec::new();
+    let devices = [
+        ("sender", "10.203.0.2", true),
+        ("one", "10.203.0.3", true),
+        ("two", "10.203.0.4", true),
+        ("denied", "10.203.0.5", true),
+        ("silent", "10.203.0.6", false),
+        ("custom", "10.4.0.7", true),
+        ("ipv6", "fd77:77::8", true),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (name, ip, enabled))| {
+        let key = 40 + i as u8;
+        peers.push(RawPeer::new("lan", name, key, 1, 40000 + u16::from(key)));
+        Device::new(device(name), public(key), vec![ip.parse().unwrap()])
+            .unwrap()
+            .with_broadcast(enabled.then_some(true))
+    })
+    .collect();
+    let lan = network("lan");
+    let net = Network::new(lan.clone(), devices)
+        .unwrap()
+        .with_private_lan(true)
+        .with_broadcast(false);
+    let acl = Policy::new(
+        vec![Rule::new(
+            endpoint("lan", "sender"),
+            endpoint("lan", "denied"),
+            Action::Deny,
+        )],
+        vec![],
+        vec![],
+    );
+    let assignment = GatewayAssignment::new(
+        node("entry"),
+        public(9),
+        wgfeel_test_support::fixture_gateway_public(&public(9)),
+        vec![lan.clone()],
+        vec![TenantKeyAssignment::new(lan.clone(), public(1))],
+    )
+    .unwrap();
+    let projection = ManagementConfig::new(
+        node("main"),
+        Config::new(1, vec![net], acl).unwrap(),
+        vec![assignment],
+    )
+    .unwrap()
+    .project_for(&node("entry"))
+    .unwrap();
+    let gateway = Gateway::from_local_projection(
+        &projection,
+        &node("main"),
+        &node("entry"),
+        &wgfeel_test_support::fixture_node_keys(seed(9)),
+        [(&lan, &TenantPrivateKey::new(seed(1)).unwrap())],
+        Limits::default(),
+    )
+    .unwrap();
+    Fixture { gateway, peers }
+}
+#[test]
+fn directed_udp_preserves_one_hop_and_delivers_two_independently_checksummed_unicasts() {
+    let mut f = discovery_fixture();
+    for i in 0..f.peers.len() {
+        f.establish(i);
+    }
+    let source = "10.203.0.2";
+    let dst = "10.203.255.255";
+    let request = packet(false, source, dst, 17, 1);
+    let first = f.submit(0, &request).unwrap().unwrap();
+    for (i, ip, event) in [
+        (1, "10.203.0.3", first),
+        (
+            2,
+            "10.203.0.4",
+            f.gateway.drain_local_broadcast().unwrap().unwrap(),
+        ),
+    ] {
+        let wire = encrypted(event, &f.peers[i]);
+        f.peers[i].assert_plaintext(server_address(), &wire, &packet(false, source, ip, 17, 1));
+    }
+    assert!(f.gateway.drain_local_broadcast().unwrap().is_none());
+    f.forward(1, 0, &udp(false, "10.203.0.3", source));
+    for (i, ip) in [(4, "10.203.0.6"), (5, "10.4.0.7")] {
+        assert!(f.submit(i, &packet(false, ip, dst, 17, 1)).is_err());
+    }
+    for (protocol, ttl) in [(6, 1), (1, 64), (2, 2), (17, 0)] {
+        assert!(
+            f.submit(0, &packet(false, source, dst, protocol, ttl))
+                .is_err()
+        );
+    }
+    assert!(
+        f.submit(0, &packet(false, "10.203.0.3", dst, 17, 1))
+            .is_err()
+    );
+    for (offset, value) in [
+        (0, 0x46),
+        (6, 0x20),
+        (6, 0x80),
+        (7, 1),
+        (24, 1),
+        (22, 0),
+        (26, 42),
+        (31, 0),
+    ] {
+        let mut damaged = request.clone();
+        damaged[offset] = value;
+        if offset == 22 {
+            damaged[23] = 0;
+        }
+        repair_ipv4(&mut damaged);
+        assert!(f.submit(0, &damaged).is_err(), "offset {offset}");
+        assert!(f.gateway.drain_local_broadcast().unwrap().is_none());
+    }
+}
+
+#[test]
+fn broadcast_odd_payload_absent_checksum_zero_source_port_and_computed_zero() {
+    let mut f = discovery_fixture();
+    f.establish(0);
+    f.establish(1);
+    let mut bytes = packet(false, "10.203.0.2", "10.203.255.255", 17, 1);
+    bytes.push(7);
+    bytes[2..4].copy_from_slice(&33u16.to_be_bytes());
+    bytes[20..22].fill(0);
+    bytes[24..26].copy_from_slice(&13u16.to_be_bytes());
+    bytes[26..28].fill(0);
+    repair_ipv4(&mut bytes);
+    let mut expected = bytes.clone();
+    expected[16..20].copy_from_slice(&[10, 203, 0, 3]);
+    repair_ipv4(&mut expected);
+    let wire = encrypted(f.submit(0, &bytes).unwrap().unwrap(), &f.peers[1]);
+    f.peers[1].assert_plaintext(server_address(), &wire, &expected);
+    // Choose two payload bytes such that the target pseudo-header checksum is zero.
+    fn udp_sum(p: &[u8]) -> u16 {
+        let mut b = p[12..20].to_vec();
+        b.extend_from_slice(&[0, 17, 0, 13]);
+        b.extend_from_slice(&p[20..]);
+        checksum(&b)
+    }
+    expected[28..30].fill(0);
+    let fix = udp_sum(&expected).to_be_bytes();
+    expected[28..30].copy_from_slice(&fix);
+    assert_eq!(udp_sum(&expected), 0);
+    bytes[28..30].copy_from_slice(&fix);
+    let original = udp_sum(&bytes);
+    assert_ne!(original, 0);
+    bytes[26..28].copy_from_slice(&original.to_be_bytes());
+    expected[26..28].fill(255);
+    let wire = encrypted(f.submit(0, &bytes).unwrap().unwrap(), &f.peers[1]);
+    f.peers[1].assert_plaintext(server_address(), &wire, &expected);
+}

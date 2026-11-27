@@ -170,7 +170,7 @@ fn prompt_cancellation_distinguishes_eof_from_enter_and_skips_users_when_unplace
                         4,
                     ),
                     ("GET", "/api/v1/users") => response(
-                        json!({"users":[{"id":"alice","name":"Alice","suspended":false,"devices":[]}]}),
+                        json!({"users":[{"id":"alice","name":"Alice","suspended":false,"broadcast":true,"devices":[]}]}),
                         4,
                     ),
                     ("POST", "/api/v1/egresses") => {
