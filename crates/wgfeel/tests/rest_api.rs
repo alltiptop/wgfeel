@@ -34,22 +34,23 @@ fn run(args: Vec<OsString>) -> wgfeel_test_support::CapturedOutput {
     command(args).wait(WAIT).unwrap()
 }
 fn exchange(address: SocketAddr, token: Option<&str>, target: &str) -> Response {
+    let header = token.map(|token| zeroize::Zeroizing::new(format!("Bearer {token}")));
+    let bytes = http::encode_request(Request {
+        method: "GET",
+        target,
+        authorization: header.as_ref().map(|s| s.as_str()),
+        if_match: None,
+        body: b"",
+    })
+    .unwrap();
+    tcp_exchange(address, &bytes)
+}
+
+fn tcp_exchange(address: SocketAddr, bytes: &[u8]) -> Response {
     let mut stream = TcpStream::connect_timeout(&address, WAIT).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.set_write_timeout(Some(WAIT)).unwrap();
-    let header = token.map(|token| format!("Bearer {token}"));
-    stream
-        .write_all(
-            &http::encode_request(Request {
-                method: "GET",
-                target,
-                authorization: header.as_deref(),
-                if_match: None,
-                body: b"",
-            })
-            .unwrap(),
-        )
-        .unwrap();
+    stream.write_all(bytes).unwrap();
     let mut bytes = Vec::new();
     stream
         .take(http::MAX_RESPONSE_BYTES as u64 + 1)
@@ -58,9 +59,9 @@ fn exchange(address: SocketAddr, token: Option<&str>, target: &str) -> Response 
     http::decode_response(&bytes).unwrap().unwrap()
 }
 
-#[test]
-fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomically() {
-    let root = Root(std::env::temp_dir().join(format!("wgfeel-rest-{}", std::process::id())));
+fn start_external(name: &str) -> (Root, SocketAddr, SocketAddr, ManagedChild) {
+    let root =
+        Root(std::env::temp_dir().join(format!("wgfeel-rest-{name}-{}", std::process::id())));
     fs::create_dir(&root.0).unwrap();
     fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700)).unwrap();
     let mesh = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -101,11 +102,10 @@ fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomica
     let ready: serde_json::Value =
         serde_json::from_slice(&server.next_stdout_line(WAIT).unwrap()).unwrap();
     assert_eq!(ready["event"], "ready");
-    assert_eq!(exchange(rest, None, "/api/v1/users").status, 401);
-    assert_eq!(
-        exchange(rest, Some(&STANDARD.encode([9; 32])), "/api/v1/users").status,
-        401
-    );
+    (root, mesh_address, rest, server)
+}
+
+fn rotate_token(state: &std::path::Path) -> (zeroize::Zeroizing<String>, u64) {
     // Rotate through the owner-only socket; do not persist or print the token.
     let mut stream = UnixStream::connect(state.join("api.sock")).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
@@ -130,7 +130,22 @@ fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomica
         token: &'a str,
     }
     let issued: Issued<'_> = serde_json::from_slice(&response.body).unwrap();
-    let token = zeroize::Zeroizing::new(issued.token.to_owned());
+    (
+        zeroize::Zeroizing::new(issued.token.to_owned()),
+        response.generation.unwrap(),
+    )
+}
+
+#[test]
+fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomically() {
+    let (root, mesh_address, rest, server) = start_external("port");
+    let state = root.0.join("state");
+    assert_eq!(exchange(rest, None, "/api/v1/users").status, 401);
+    assert_eq!(
+        exchange(rest, Some(&STANDARD.encode([9; 32])), "/api/v1/users").status,
+        401
+    );
+    let (token, _) = rotate_token(&state);
     let token = token.as_str();
     assert_eq!(exchange(rest, Some(token), "/api/v1/users").status, 200);
     assert_eq!(
@@ -213,6 +228,138 @@ fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomica
     assert_eq!(
         document["components"]["securitySchemes"]["adminBearer"]["scheme"],
         "bearer"
+    );
+    server.terminate().unwrap();
+}
+
+#[test]
+fn external_http_put_checks_framing_revision_and_redacts_provider_secrets() {
+    use zeroize::{Zeroize, Zeroizing};
+    #[derive(serde::Deserialize)]
+    struct Admin {
+        admin_private_key: [u8; 32],
+    }
+    impl Drop for Admin {
+        fn drop(&mut self) {
+            self.admin_private_key.zeroize();
+        }
+    }
+    let (root, _, address, server) = start_external("put");
+    let profile = Zeroizing::new(fs::read(root.0.join("admin.json")).unwrap());
+    let admin: Admin = serde_json::from_slice(&profile).unwrap();
+    let (token, initial_revision) = rotate_token(&root.0.join("state"));
+    let credential = Zeroizing::new(STANDARD.decode(token.as_bytes()).unwrap());
+    let private = [41; 32];
+    let preshared = [43; 32];
+    let config = Zeroizing::new(format!(
+        "[Interface]\nPrivateKey = {}\nAddress = 172.16.0.41/24\n[Peer]\nPublicKey = {}\nPresharedKey = {}\nEndpoint = vpn.example.org:51820\nAllowedIPs = 0.0.0.0/0\n",
+        STANDARD.encode(private),
+        STANDARD.encode([42; 32]),
+        STANDARD.encode(preshared)
+    ));
+    let body = |name: &str| {
+        #[derive(serde::Serialize)]
+        struct Import<'a> {
+            config: &'a str,
+            name: &'a str,
+        }
+        Zeroizing::new(
+            serde_json::to_vec(&Import {
+                config: &config,
+                name,
+            })
+            .unwrap(),
+        )
+    };
+    let send = |method: &str, path: &str, revision: Option<u64>, headers: &str, body: &[u8]| {
+        let revision = revision
+            .map(|g| format!("If-Match: \"{g}\"\r\n"))
+            .unwrap_or_default();
+        let head = Zeroizing::new(format!(
+            "{method} {path} HTTP/1.1\r\nHost: wgfeel\r\nAuthorization: Bearer {}\r\n{revision}{headers}Connection: close\r\n\r\n",
+            token.as_str()
+        ));
+        let mut bytes = Zeroizing::new(Vec::with_capacity(head.len() + body.len()));
+        bytes.extend_from_slice(head.as_bytes());
+        bytes.extend_from_slice(body);
+        tcp_exchange(address, &bytes)
+    };
+    let redacted = |response: &Response| {
+        let text = std::str::from_utf8(&response.body).unwrap();
+        for marker in [
+            "[Interface]",
+            "PrivateKey =",
+            "PresharedKey =",
+            "\"config\":",
+        ] {
+            assert!(
+                !text.contains(marker),
+                "response exposed the submitted configuration"
+            );
+        }
+        for key in [
+            private.as_slice(),
+            preshared.as_slice(),
+            credential.as_slice(),
+            admin.admin_private_key.as_slice(),
+        ] {
+            let encoded = Zeroizing::new(STANDARD.encode(key));
+            let array = Zeroizing::new(serde_json::to_string(key).unwrap());
+            assert!(
+                !text.contains(encoded.as_str()) && !text.contains(array.as_str()),
+                "response exposed private material"
+            );
+        }
+    };
+    let valid = |body: &[u8]| {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    };
+    let collection = "/api/v1/egresses";
+    let create = body("original");
+    let created = send(
+        "POST",
+        collection,
+        Some(initial_revision),
+        &valid(&create),
+        &create,
+    );
+    redacted(&created);
+    assert_eq!(created.status, 201);
+    let record: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+    let path = format!("{collection}/{}", record["id"].as_str().unwrap());
+    let generation = created.generation.unwrap();
+    let update = body("updated");
+    let framing = valid(&update);
+    let repeated = format!("{framing}Content-Length: {}\r\n", update.len());
+    let plain = format!(
+        "Content-Type: text/plain\r\nContent-Length: {}\r\n",
+        update.len()
+    );
+    for (headers, revision, expected) in [
+        (repeated.as_str(), Some(generation), 400),
+        ("Content-Type: application/json\r\n", Some(generation), 411),
+        (plain.as_str(), Some(generation), 415),
+        (framing.as_str(), Some(initial_revision), 412),
+    ] {
+        let rejected = send("PUT", &path, revision, headers, &update);
+        assert_eq!(rejected.status, expected);
+        redacted(&rejected);
+    }
+    let updated = send("PUT", &path, Some(generation), &framing, &update);
+    assert_eq!(
+        (updated.status, updated.generation),
+        (200, Some(generation + 1))
+    );
+    redacted(&updated);
+    let saved = exchange(address, Some(&token), &path);
+    assert_eq!((saved.status, saved.generation), (200, updated.generation));
+    redacted(&saved);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&saved.body).unwrap()["name"],
+        "updated"
     );
     server.terminate().unwrap();
 }

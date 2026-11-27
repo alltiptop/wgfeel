@@ -170,7 +170,7 @@ pub(super) fn commands() -> Vec<CommandHelp> {
         command(
             "completions",
             "SHELL",
-            "Print shell integration for Bash or Zsh. Source it in the matching shell after enabling its standard completion system. Static commands require no connection. User, device and node IDs are queried using the current administrator connection and permissions; unavailable data produces no dynamic suggestions.",
+            "Print shell integration for Bash or Zsh. Source it in the matching shell after enabling its standard completion system. Static commands require no connection. User, device, egress and node IDs are queried using the current administrator connection and permissions; unavailable data produces no dynamic suggestions.",
             &[("SHELL", "bash or zsh.")],
             &[
                 "source <(wgfeel completions bash)",
@@ -423,8 +423,143 @@ fn administration() -> Vec<CommandHelp> {
             &["wgfeel token rotate"],
         ),
     ];
+    pages.extend(egress_commands());
     for page in &mut pages {
         page.administrative = true;
     }
     pages
+}
+
+fn egress_commands() -> Vec<CommandHelp> {
+    const QUIET: OptionHelp = (
+        "--non-interactive",
+        "Read the supplied arguments without prompting.",
+    );
+    const FILE: OptionHelp = (
+        "--config-file PATH",
+        "Read one WireGuard provider profile from this file (16 KiB maximum).",
+    );
+    const STDIN: OptionHelp = (
+        "--config-stdin",
+        "Read the provider profile from standard input through EOF. This disables all prompts.",
+    );
+    const NAME: OptionHelp = (
+        "--name NAME",
+        "Display name of the egress profile, up to 128 bytes.",
+    );
+    const NODE: OptionHelp = (
+        "--node NODE_ID",
+        "Place the profile on this eligible entry node.",
+    );
+    const INTERNET: OptionHelp = (
+        "--internet",
+        "Grant the default route for each address family supported by the profile and its provider AllowedIPs.",
+    );
+    const ROUTES: OptionHelp = (
+        "--routes CIDRS",
+        "Comma-separated explicit route prefixes for this assignment.",
+    );
+    const DNS: OptionHelp = (
+        "--dns-default",
+        "Use eligible provider DNS servers as the user's default DNS.",
+    );
+    const ZONES: OptionHelp = (
+        "--dns-zones ZONES",
+        "Use provider DNS for these comma-separated domain suffixes.",
+    );
+    vec![
+        command(
+            "egress",
+            "",
+            "Open the interactive menu to import, inspect, place and delete external WireGuard profiles.",
+            &[],
+            &["wgfeel egress"],
+        ),
+        command(
+            "egress add",
+            "[FILE] [OPTIONS]",
+            "Import one provider profile. With a node and users, placement and all initial user assignments are saved together. In scripts, omitted names default to the endpoint host, omitted nodes leave the profile unassigned and omitted users grant no routes.",
+            &[
+                FILE,
+                STDIN,
+                NAME,
+                NODE,
+                (
+                    "--users IDS",
+                    "Comma-separated user IDs. Requires a node and either --routes or --internet.",
+                ),
+                INTERNET,
+                ROUTES,
+                DNS,
+                ZONES,
+                QUIET,
+            ],
+            &[
+                "wgfeel egress add office.conf",
+                "wgfeel egress add --config-stdin < office.conf",
+            ],
+        ),
+        command(
+            "egress list",
+            "",
+            "List saved egress profiles and their placement.",
+            &[],
+            &["wgfeel egress list"],
+        ),
+        command(
+            "egress show",
+            "[EGRESS_ID]",
+            "Show public provider parameters, allowed prefixes and placement.",
+            &[],
+            &["wgfeel egress show eg_office"],
+        ),
+        command(
+            "egress replace",
+            "EGRESS_ID [FILE] [OPTIONS]",
+            "Replace the provider configuration under the same egress ID. Omit the name to preserve the current display name.",
+            &[FILE, STDIN, NAME, QUIET],
+            &["wgfeel egress replace eg_office office.conf"],
+        ),
+        command(
+            "egress node",
+            "[EGRESS_ID] [--node NODE_ID | --unassign]",
+            "Inspect placement or request a global attach, move or detach. A move can remain pending until the former node releases the profile.",
+            &[
+                NODE,
+                (
+                    "--unassign",
+                    "Detach the profile or cancel a pending destination. Requires confirmation at a terminal, defaulting to no. For unattended changes use the node placement REST endpoint with If-Match.",
+                ),
+            ],
+            &["wgfeel egress node eg_office --node entry_b"],
+        ),
+        command(
+            "egress delete",
+            "[EGRESS_ID]",
+            "Delete a saved egress after confirmation at a terminal. Remove all user assignments and detach the profile first.",
+            &[],
+            &["wgfeel egress delete eg_office"],
+        ),
+        command(
+            "user egress list",
+            "[USER_ID]",
+            "List the user's egress assignments, placement, routes and DNS selection.",
+            &[],
+            &["wgfeel user egress list alice"],
+        ),
+        command(
+            "user egress set",
+            "[USER_ID] [EGRESS_ID] [OPTIONS]",
+            "Create or replace one assignment. Supply route intent; DNS defaults to none. An unassigned profile can be attached first using --node. Re-export device profiles after changing the assignment.",
+            &[NODE, INTERNET, ROUTES, DNS, ZONES, QUIET],
+            &["wgfeel user egress set alice eg_office --routes 10.40.0.0/16"],
+        ),
+        command(
+            "user egress remove",
+            "[USER_ID] [EGRESS_ID]",
+            "Remove one assignment after confirmation at a terminal. Re-export the affected device profiles.",
+            &[],
+            &["wgfeel user egress remove alice eg_office"],
+        ),
+    ]
 }

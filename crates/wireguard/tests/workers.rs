@@ -65,6 +65,7 @@ fn config(context: ContextId, key: u8, peer_key: u8) -> ContextConfig {
         public_key: DevicePublicKey::new(public(peer_key)).unwrap(),
     }];
     match context {
+        ContextId::External(_) => unreachable!("public listener fixture"),
         ContextId::Tenant(network) => {
             ContextConfig::tenant(network, TenantPrivateKey::new(seed(key)).unwrap(), peers)
         }

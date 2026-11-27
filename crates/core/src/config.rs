@@ -369,6 +369,35 @@ impl Config {
             .cloned()
             .ok_or(crate::RouteError::UnknownDestination)
     }
+    /// Cross-network native routes must be unambiguous, permitted and share the source home.
+    pub fn granted_host_addresses<'a>(
+        &'a self,
+        source: &'a Endpoint,
+    ) -> impl Iterator<Item = IpAddr> + 'a {
+        let device = |ep: &Endpoint| {
+            self.endpoint_network(ep)?
+                .devices
+                .iter()
+                .find(|d| d.id() == ep.device())
+        };
+        let home = device(source).and_then(Device::gateway);
+        self.policy
+            .grants
+            .iter()
+            .filter(move |grant| grant.source == *source)
+            .filter(move |grant| self.decision(source, &grant.destination) == Action::Allow)
+            .filter_map(move |grant| {
+                let target = device(&grant.destination)?;
+                (home.is_some() && target.gateway() == home).then_some((&grant.destination, target))
+            })
+            .flat_map(move |(target, device)| {
+                device
+                    .addresses()
+                    .iter()
+                    .copied()
+                    .filter(move |ip| self.resolve_destination(source, *ip).as_ref() == Ok(target))
+            })
+    }
     pub fn validate_successor(&self, candidate: &Self) -> Result<(), DomainError> {
         if candidate.generation <= self.generation {
             return Err(DomainError::GenerationNotIncreasing);

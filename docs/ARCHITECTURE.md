@@ -78,6 +78,26 @@ Between entries, tenant packets stay encrypted across intermediate relays;
 relays see only public routing/ACL metadata for their assigned networks. This
 protects transit across relays, not device-to-device end-to-end secrecy.
 
+## External WireGuard provider profiles
+
+An egress profile identifies a provider session. Its placement selects an
+entry node, while each user assignment independently selects explicit
+routes and optional provider DNS. Several users can share a profile.
+The saved, unassigned state keeps its keys on main. During a move, main
+reserves the former interface key until the old node acknowledges withdrawal.
+The stable egress ID allows the owner to move without renumbering user
+assignments or exporting new device profiles for a placement-only change.
+
+The home entry resolves internal DNS and device destinations first, then
+selects the longest matching prefix from that user's egress assignments.
+A dormant or unreachable match drops the packet. For a remote owner, the
+home entry and owner carry tenant WireGuard ciphertext across the mesh with
+the egress ID, device and selected prefix. The owner rechecks the route after
+decryption and applies NAPT44 or NAPT66 before sending to the provider.
+Each active profile has a confined WireGuard worker and a dedicated connected
+UDP socket. Replies must match the translated flow and its original remote
+endpoint. Revoking one user's grant removes that user's matching flows.
+
 ## Policy, routing and failover
 
 - **Uniform policy enforcement**: local forwarding, mesh ingress, relay

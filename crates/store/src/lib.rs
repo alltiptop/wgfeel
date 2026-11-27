@@ -10,7 +10,9 @@ use zeroize::Zeroizing;
 
 mod admin_auth;
 mod delivery;
+mod egresses;
 pub use admin_auth::AdminVerifier;
+pub use egresses::{EgressKeys, LocalEgressSecrets};
 mod management;
 mod path;
 mod secrets;
@@ -94,6 +96,7 @@ pub struct StoredState {
     node_id: NodeId,
     key: NodeKeys,
     local_tenants: LocalTenants,
+    egress_keys: LocalEgressSecrets,
     management_public_key: Option<DevicePublicKey>,
 }
 impl StoredState {
@@ -111,6 +114,9 @@ impl StoredState {
     }
     pub fn node_keys(&self) -> &NodeKeys {
         &self.key
+    }
+    pub fn egress_keys(&self) -> &LocalEgressSecrets {
+        &self.egress_keys
     }
     pub fn local_tenants(&self) -> &LocalTenants {
         &self.local_tenants
@@ -133,6 +139,8 @@ struct WriteState<'a> {
     gateway_private_key: &'a [u8; 32],
     projection: &'a RawValue,
     tenant_private_keys: tenants::WriteTenants<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress_private_keys: Option<egresses::WriteEgressSecrets<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     management_public_key: Option<&'a DevicePublicKey>,
 }
@@ -176,6 +184,8 @@ struct ReadState<'a> {
     #[serde(borrow)]
     projection: &'a RawValue,
     tenant_private_keys: tenants::ReadTenants,
+    #[serde(default, deserialize_with = "egresses::present")]
+    egress_private_keys: Option<LocalEgressSecrets>,
     #[serde(default, deserialize_with = "read_management_key")]
     management_public_key: Option<[u8; 32]>,
 }
@@ -203,6 +213,25 @@ impl Store {
             projection.recipient(),
             key,
             tenants,
+            &LocalEgressSecrets::default(),
+            Some(management_key),
+            |_| Ok(()),
+        )
+    }
+    pub fn commit_managed_delivery(
+        &mut self,
+        delivery: &GatewayDelivery,
+        key: &NodeKeys,
+        management_key: &DevicePublicKey,
+    ) -> Result<(), StoreError> {
+        let p = delivery.projection();
+        self.commit_projection_inner(
+            p.management_id(),
+            p,
+            p.recipient(),
+            key,
+            delivery.keys(),
+            delivery.egress_keys(),
             Some(management_key),
             |_| Ok(()),
         )
@@ -218,6 +247,45 @@ impl Store {
         expected_pin: Option<&DevicePublicKey>,
         projection: &GatewayProjection,
         tenants: &LocalTenants,
+        management_key: &DevicePublicKey,
+        checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
+    ) -> Result<(), StoreError> {
+        self.accept_material(
+            expected,
+            expected_pin,
+            projection,
+            tenants,
+            &LocalEgressSecrets::default(),
+            management_key,
+            checkpoint,
+        )
+    }
+    pub fn accept_delivery_with_checkpoint(
+        &mut self,
+        expected: &GatewayProjection,
+        expected_pin: Option<&DevicePublicKey>,
+        delivery: &GatewayDelivery,
+        management_key: &DevicePublicKey,
+        checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
+    ) -> Result<(), StoreError> {
+        self.accept_material(
+            expected,
+            expected_pin,
+            delivery.projection(),
+            delivery.keys(),
+            delivery.egress_keys(),
+            management_key,
+            checkpoint,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn accept_material(
+        &mut self,
+        expected: &GatewayProjection,
+        expected_pin: Option<&DevicePublicKey>,
+        projection: &GatewayProjection,
+        tenants: &LocalTenants,
+        egress_keys: &LocalEgressSecrets,
         management_key: &DevicePublicKey,
         checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
     ) -> Result<(), StoreError> {
@@ -243,6 +311,7 @@ impl Store {
                 previous.node_id(),
                 previous.node_keys(),
                 tenants,
+                egress_keys,
                 Some(management_key),
                 checkpoint,
             );
@@ -251,6 +320,7 @@ impl Store {
             projection,
             previous.node_keys(),
             tenants,
+            egress_keys,
             Some(management_key),
             checkpoint,
         )
@@ -291,6 +361,7 @@ impl Store {
             node_id,
             key,
             tenants,
+            &LocalEgressSecrets::default(),
             None,
             checkpoint,
         )
@@ -303,6 +374,7 @@ impl Store {
         node_id: &NodeId,
         key: &NodeKeys,
         tenants: &LocalTenants,
+        egress_keys: &LocalEgressSecrets,
         requested_management_key: Option<&DevicePublicKey>,
         checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
     ) -> Result<(), StoreError> {
@@ -336,7 +408,14 @@ impl Store {
                 .as_ref()
                 .and_then(StoredState::management_public_key)
         });
-        self.publish_projection(projection, key, tenants, management_public_key, checkpoint)
+        self.publish_projection(
+            projection,
+            key,
+            tenants,
+            egress_keys,
+            management_public_key,
+            checkpoint,
+        )
     }
 
     pub fn open(path: &Path) -> Result<Self, StoreError> {
@@ -356,15 +435,21 @@ impl Store {
         };
         let state: ReadState<'_> =
             serde_json::from_slice(&bytes).map_err(|_| StoreError::InvalidState)?;
-        let management_public_key = match (state.storage_version, state.management_public_key) {
-            (3, None) => None,
-            (4, Some(key)) => {
+        let management_public_key = match (
+            state.storage_version,
+            state.management_public_key,
+            state.egress_private_keys.is_some(),
+        ) {
+            (3, None, false) => None,
+            (4, Some(key), false) | (5, Some(key), true) => {
                 Some(DevicePublicKey::new(key).map_err(|_| StoreError::InvalidState)?)
             }
             _ => return Err(StoreError::InvalidState),
         };
         let projection = GatewayProjection::from_json(state.projection.get())
             .map_err(|_| StoreError::InvalidState)?;
+        let egress_keys = state.egress_private_keys.unwrap_or_default();
+        egress_keys.validate(&projection)?;
         let local_tenants = state.tenant_private_keys.0;
         let node_id = NodeId::new(&state.node_id).map_err(|_| StoreError::InvalidState)?;
         let key = NodeKeys::new(
@@ -379,6 +464,7 @@ impl Store {
             node_id,
             key,
             local_tenants,
+            egress_keys,
             management_public_key,
         };
         state
@@ -396,17 +482,22 @@ impl Store {
         projection: &GatewayProjection,
         key: &NodeKeys,
         tenants: &LocalTenants,
+        egress_keys: &LocalEgressSecrets,
         management_public_key: Option<&DevicePublicKey>,
         checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
     ) -> Result<(), StoreError> {
         let recipient = projection.recipient();
         tenants.validate_projection(projection, key)?;
+        if management_public_key.is_none() && !projection.owned_egresses().is_empty() {
+            return Err(StoreError::AuthorityChanged);
+        }
+        egress_keys.validate(projection)?;
         let projection =
             RawValue::from_string(projection.to_json().map_err(StoreError::InvalidConfig)?)
                 .map_err(|_| StoreError::InvalidState)?;
         let envelope = WriteState {
             storage_version: if management_public_key.is_some() {
-                4
+                5
             } else {
                 3
             },
@@ -415,6 +506,8 @@ impl Store {
             gateway_private_key: key.gateway().expose_bytes(),
             projection: &projection,
             tenant_private_keys: tenants::WriteTenants(tenants),
+            egress_private_keys: management_public_key
+                .map(|_| egresses::WriteEgressSecrets(&egress_keys.0)),
             management_public_key,
         };
         // Cursor<&mut [u8]> fails at the bound instead of reallocating secrets.

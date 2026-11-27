@@ -197,6 +197,11 @@ pub(crate) fn authorize_routed(
     ))
 }
 
+pub(crate) fn addresses(bytes: &[u8]) -> Result<(IpAddr, IpAddr), ForwardError> {
+    let ip = parse(bytes)?;
+    Ok((ip.source, ip.destination))
+}
+
 struct ParsedIp {
     source: IpAddr,
     destination: IpAddr,

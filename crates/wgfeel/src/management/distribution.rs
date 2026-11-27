@@ -127,8 +127,8 @@ impl Distributor {
             outgoing,
         })
     }
-    pub(super) fn receive(&self, peer: &NodeId, packet: &[u8]) {
-        if packet.len() > wgfeel_wireguard::MAX_PLAINTEXT_SIZE {
+    pub(super) fn receive(&self, generation: u64, peer: &NodeId, packet: &[u8]) {
+        if generation != self.generation || packet.len() > wgfeel_wireguard::MAX_PLAINTEXT_SIZE {
             return;
         }
         if let Some(worker) = self
@@ -145,7 +145,9 @@ impl Distributor {
     }
     pub(super) fn flush(&self, tunnel: &mut super::main_transport::Transport) {
         for packet in self.outgoing.try_iter().take(64) {
-            if packet.generation == self.generation {
+            if packet.generation == self.generation
+                && packet.generation == tunnel.applied_generation()
+            {
                 tunnel.send_distribution(&packet.peer, &packet.bytes);
             }
         }
@@ -220,6 +222,12 @@ impl Distributor {
                 .retired_gateways()
                 .iter()
                 .any(|old| old.recipient() == node.recipient());
+            if !retired
+                && (transport.applied_generation() != generation
+                    || transport.peer_identity(node.recipient()) != Some(node.service_public_key()))
+            {
+                continue;
+            }
             let projection = if retired {
                 routing.withdraw_for(node)
             } else {

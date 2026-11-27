@@ -194,12 +194,25 @@ fn hostname(name: &str, network: &Network) -> Result<String, ApiError> {
     Err(ApiError(422, "hostname_pool_exhausted"))
 }
 
-pub(super) fn reconcile(
-    document: ManagementDocument,
+pub(super) fn apply_change(
+    document: &ManagementDocument,
+    revision: u64,
     change: &ManagementChange,
     secrets: &mut ManagementSecrets,
 ) -> Result<ManagementDocument, ApiError> {
-    let mut networks = document.routing().config().networks().to_vec();
+    let next = document.apply_change_with_scope(revision, change, |routing, policy| {
+        reconcile(routing, policy, change, secrets)
+    })?;
+    secrets.retain_document(&next);
+    Ok(next)
+}
+fn reconcile(
+    routing: ManagementConfig,
+    policy: &EgressPolicy,
+    change: &ManagementChange,
+    secrets: &mut ManagementSecrets,
+) -> Result<ManagementConfig, ApiError> {
+    let mut networks = routing.config().networks().to_vec();
     if let ManagementChange::AddClient { network, .. } = change {
         for entry in &mut networks {
             if entry.id() == network {
@@ -207,14 +220,26 @@ pub(super) fn reconcile(
             }
         }
     }
-    let mut assignments = document.routing().assignments().to_vec();
+    let mut assignments = routing.assignments().to_vec();
     for node in &mut assignments {
         if !node.auto_networks() {
             continue;
         }
         let scope: Vec<_> = networks
             .iter()
-            .filter(|network| node.traffic().carries_user_traffic() && network.private_lan())
+            .filter(|network| {
+                node.traffic().carries_user_traffic()
+                    && (network.private_lan()
+                        || policy.users.iter().any(|u| {
+                            u.network == *network.id()
+                                && u.egresses.iter().any(|grant| {
+                                    policy.profile(&grant.egress_id).is_some_and(|p| {
+                                        p.node.as_ref().or(p.pending_node.as_ref())
+                                            == Some(node.recipient())
+                                    })
+                                })
+                        }))
+            })
             .map(|network| network.id().clone())
             .collect();
         let mut tenants = Vec::with_capacity(scope.len());
@@ -268,14 +293,11 @@ pub(super) fn reconcile(
             .collect();
         *network = network.with_devices(devices)?;
     }
-    let routing = ManagementConfig::new(
-        document.routing().management_id().clone(),
-        document.routing().config().with_networks(networks)?,
+    Ok(ManagementConfig::new(
+        routing.management_id().clone(),
+        routing.config().with_networks(networks)?,
         assignments,
-    )?;
-    let document = ManagementDocument::new(routing, document.clients().to_vec())?;
-    secrets.retain_document(&document);
-    Ok(document)
+    )?)
 }
 
 pub(super) fn export(
@@ -352,32 +374,96 @@ pub(super) fn export(
     } else {
         IpAddr::V6(DNS_IPV6)
     };
-    write!(output, "\n# Split DNS: {DNS_ZONE} via {dns}\n")
+    output.push(b'\n');
+    let routing = state.document().routing();
+    let policy = routing.egress_policy();
+    let grants = policy.users.iter().find(|u| u.user == user);
+    let families = |ip: IpAddr| {
+        selected
+            .registration
+            .addresses()
+            .iter()
+            .any(|a| a.is_ipv4() == ip.is_ipv4())
+    };
+    let mut zones = std::collections::BTreeMap::new();
+    let mut external = std::collections::BTreeSet::new();
+    let mut default_v4 = false;
+    let mut default_v6 = false;
+    if let Some(grants) = grants {
+        for grant in &grants.egresses {
+            for &route in &grant.routes {
+                if families(route.network()) {
+                    external.insert(route);
+                    if route.length() == 0 {
+                        default_v4 |= route.network().is_ipv4();
+                        default_v6 |= route.network().is_ipv6();
+                    }
+                }
+            }
+            let servers =
+                policy.dns_servers(grants, grant, routing.config(), Some(selected.registration));
+            let servers = servers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match &grant.dns {
+                EgressDnsSelection::Default {} => writeln!(output, "DNS = {servers}")
+                    .map_err(|_| ApiError(500, "encoding_failed"))?,
+                EgressDnsSelection::Zones {
+                    zones: selected_zones,
+                } => {
+                    for zone in selected_zones {
+                        zones.insert(zone.as_str(), servers.clone());
+                    }
+                }
+                EgressDnsSelection::None {} => (),
+            }
+        }
+    }
+    writeln!(output, "# Split DNS: {DNS_ZONE} via {dns}")
         .map_err(|_| ApiError(500, "encoding_failed"))?;
+    for (zone, servers) in zones {
+        writeln!(output, "# Split DNS: {zone} via {servers}")
+            .map_err(|_| ApiError(500, "encoding_failed"))?;
+    }
+    if families(IpAddr::V6(DNS_IPV6)) && default_v4 && !default_v6 {
+        output.extend_from_slice(b"# IPv6 internet traffic remains outside the tunnel.\n");
+    }
     if let Some(hostname) = selected.registration.hostname() {
         writeln!(output, "# available at {hostname}.{DNS_ZONE}")
             .map_err(|_| ApiError(500, "encoding_failed"))?;
     }
     output.extend_from_slice(b"MTU = 1280\n");
     write_peer(&mut output, gateway, public).map_err(|_| ApiError(500, "encoding_failed"))?;
-    output.extend_from_slice(b"AllowedIPs = 10.203.0.0/16, fd77:77::/64");
+    let source = Endpoint::new(selected.network.id().clone(), device);
+    let mut custom = std::collections::BTreeSet::new();
     for address in selected
         .network
         .devices()
         .iter()
-        .flat_map(|device| device.addresses())
+        .flat_map(Device::addresses)
+        .copied()
+        .chain(routing.config().granted_host_addresses(&source))
     {
-        let covered = match address {
-            IpAddr::V4(ip) => ip.octets()[..2] == [10, 203],
-            IpAddr::V6(ip) => ip.segments()[..4] == [0xfd77, 0x77, 0, 0],
-        };
-        if !covered {
-            write!(
-                output,
-                ", {address}/{}",
-                if address.is_ipv4() { 32 } else { 128 }
-            )
-            .map_err(|_| ApiError(500, "encoding_failed"))?;
+        let prefix = IpPrefix::host(address);
+        if families(address) && !prefix.internal() {
+            custom.insert(prefix);
+        }
+    }
+    let mut emitted = std::collections::BTreeSet::new();
+    output.extend_from_slice(b"AllowedIPs = ");
+    for prefix in [IpPrefix::internal_v4(), IpPrefix::internal_v6()]
+        .into_iter()
+        .filter(|p| families(p.network()))
+        .chain(custom)
+        .chain(external)
+    {
+        if emitted.insert(prefix) {
+            if emitted.len() > 1 {
+                output.extend_from_slice(b", ");
+            }
+            write!(output, "{prefix}").map_err(|_| ApiError(500, "encoding_failed"))?;
         }
     }
     output.extend_from_slice(b"\nPersistentKeepalive = 25\n");

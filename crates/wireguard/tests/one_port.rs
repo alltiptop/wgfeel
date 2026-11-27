@@ -145,6 +145,7 @@ impl RawPeer {
 
 fn context_config(context: &ContextId, key: u16, peers: Vec<PeerConfig>) -> ContextConfig {
     match context {
+        ContextId::External(_) => unreachable!("public listener fixture"),
         ContextId::Tenant(id) => {
             ContextConfig::tenant(id.clone(), TenantPrivateKey::new(seed(key)).unwrap(), peers)
         }

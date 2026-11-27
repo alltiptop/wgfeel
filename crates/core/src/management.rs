@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{collections::BTreeSet, fmt};
 
-pub const MANAGEMENT_VERSION: u32 = 1;
+pub const MANAGEMENT_VERSION: u32 = 2;
 pub const MAX_CLIENTS: usize = 750;
 pub const MAX_CLIENT_DEVICES: usize = 750;
 pub const MAX_DEVICE_NAME_BYTES: usize = 128;
@@ -140,6 +140,9 @@ pub struct WireManagement<'a> {
     #[schemars(with = "crate::wire::WireConfig<'a>")]
     config: &'a RawValue,
     assignments: &'a [GatewayAssignment],
+    egresses: &'a [crate::EgressProfile],
+    user_egresses: &'a [crate::UserEgresses],
+    egress_key_reservations: &'a [crate::EgressKeyReservation],
     clients: &'a [Client],
 }
 
@@ -190,6 +193,13 @@ impl ManagementDocument {
             .any(|device| !devices.insert(device.id()))
         {
             return Err(DomainError::DuplicateDeviceId);
+        }
+        if routing.egress_policy().users.iter().any(|u| {
+            !clients
+                .iter()
+                .any(|c| c.id() == &u.user && c.network() == &u.network)
+        }) {
+            return Err(DomainError::InvalidClientOwnership);
         }
         Ok(Self { routing, clients })
     }
@@ -254,9 +264,21 @@ impl ManagementDocument {
         }
         let raw: RawManagement<'_> =
             serde_json::from_str(input).map_err(|_| DomainError::InvalidJson)?;
-        if raw.management_version != u64::from(MANAGEMENT_VERSION) {
-            return Err(DomainError::UnsupportedSchemaVersion);
-        }
+        let egresses = match (
+            raw.management_version,
+            raw.egresses,
+            raw.user_egresses,
+            raw.egress_key_reservations,
+        ) {
+            (1, None, None, None) => crate::EgressPolicy::default(),
+            (2, Some(profiles), Some(users), Some(reservations)) => crate::EgressPolicy {
+                profiles,
+                users,
+                reservations,
+            },
+            (1 | 2, ..) => return Err(DomainError::InvalidJson),
+            _ => return Err(DomainError::UnsupportedSchemaVersion),
+        };
         if raw.assignments.len() > crate::MAX_GATEWAYS || raw.clients.len() > MAX_CLIENTS {
             return Err(DomainError::LimitExceeded);
         }
@@ -268,6 +290,7 @@ impl ManagementDocument {
                 .map(RawAssignment::validate)
                 .collect::<Result<_, _>>()?,
         )?;
+        let routing = routing.with_egress_policy(egresses)?;
         let clients = raw
             .clients
             .into_iter()
@@ -309,6 +332,9 @@ impl ManagementDocument {
             management_id: self.routing.management_id(),
             config: &config,
             assignments: self.routing.assignments(),
+            egresses: self.routing.egresses(),
+            user_egresses: &self.routing.egress_policy().users,
+            egress_key_reservations: &self.routing.egress_policy().reservations,
             clients: &self.clients,
         })
         .map_err(|_| DomainError::InvalidJson)?;
@@ -349,6 +375,12 @@ struct RawManagement<'a> {
     #[serde(borrow)]
     config: &'a RawValue,
     assignments: Vec<RawAssignment>,
+    #[serde(default, deserialize_with = "crate::projection::present")]
+    egresses: Option<Vec<crate::EgressProfile>>,
+    #[serde(default, deserialize_with = "crate::projection::present")]
+    user_egresses: Option<Vec<crate::UserEgresses>>,
+    #[serde(default, deserialize_with = "crate::projection::present")]
+    egress_key_reservations: Option<Vec<crate::EgressKeyReservation>>,
     clients: Vec<RawClient>,
 }
 #[derive(Deserialize)]

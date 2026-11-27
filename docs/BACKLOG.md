@@ -22,15 +22,14 @@
 
   - **Internet exit.** Route the assigned users' internet traffic through the
     external gateway, for example using a compatible WARP or Proton VPN profile.
-  - **Selected destinations.** Route traffic for a host such as `admin.website`
-    or a corporate subnet through a standard WireGuard server. Other traffic
-    follows its usual route.
+  - **Selected destinations.** Route traffic for a corporate subnet through a
+    standard WireGuard server. Other traffic follows its usual route.
 
   If a mesh partition cuts off the designated node, the exit is unavailable
   on that side until a route returns. Any future automatic takeover requires
   both an outage and exclusive use of the external profile by the new node.
 
-  Test both modes in Compose with a separate WireGuard server. Verify which
+  Test both modes against a separate WireGuard server. Verify which
   traffic exits there, that unassigned users cannot use it through wgfeel, and
   that users sharing it cannot reach each other's devices. Revoking one user's
   assignment must preserve access for the others.

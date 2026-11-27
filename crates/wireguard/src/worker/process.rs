@@ -40,6 +40,7 @@ impl Process {
         let context = match context {
             ContextId::Gateway => "gateway".to_owned(),
             ContextId::Service => "service".to_owned(),
+            ContextId::External(id) => format!("external:{}", id.as_str()),
             ContextId::Tenant(id) => format!("tenant:{}", id.as_str()),
         };
         let child = Command::new(executable)

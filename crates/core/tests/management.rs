@@ -459,7 +459,7 @@ fn catalog_is_management_only_and_existing_gateway_projection_policy_is_unchange
     assert!(!json.contains("clients"));
     assert!(!json.contains("private display label"));
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["projection_version"], 1);
+    assert_eq!(value["projection_version"], 3);
     assert_eq!(value["config"]["schema_version"], 1);
 }
 
@@ -501,7 +501,7 @@ fn independent_json_fixture_decodes_optional_metadata_and_roundtrips_public_docu
     let encoded = doc.to_json().unwrap();
     assert_eq!(ManagementDocument::from_json(&encoded).unwrap(), doc);
     let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(value["management_version"], 1);
+    assert_eq!(value["management_version"], 2);
     assert_eq!(value["management_id"], "management");
     assert_eq!(
         value["clients"][0]["devices"][0]["metadata"]["name"],
@@ -633,9 +633,9 @@ fn structurally_valid_json_cannot_bypass_ownership_or_metadata_validation() {
 
 #[test]
 fn schema_version_uses_unsigned_integer_and_document_input_has_exact_byte_bound() {
-    assert_eq!(MANAGEMENT_VERSION, 1);
+    assert_eq!(MANAGEMENT_VERSION, 2);
     assert_eq!(MAX_MANAGEMENT_BYTES, 16_777_216);
-    for version in ["0", "2", "4294967296", "18446744073709551615"] {
+    for version in ["0", "3", "4294967296", "18446744073709551615"] {
         let json = LITERAL.replacen(
             r#""management_version":1"#,
             &format!(r#""management_version":{version}"#),

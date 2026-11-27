@@ -8,6 +8,11 @@ macro_rules! identifier {
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
         #[serde(transparent)]
         pub struct $name(String);
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+                Self::new(&String::deserialize(de)?).map_err(serde::de::Error::custom)
+            }
+        }
         impl $name {
             pub fn new(value: &str) -> Result<Self, DomainError> {
                 if value.is_empty()
@@ -30,6 +35,7 @@ identifier!(NetworkId);
 identifier!(ClientId);
 identifier!(DeviceId);
 identifier!(NodeId);
+identifier!(EgressId);
 
 /// Structurally valid public key; possession is established by WireGuard later.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
@@ -41,6 +47,19 @@ impl DevicePublicKey {
             return Err(DomainError::InvalidKey);
         }
         Ok(Self(value))
+    }
+    /// Compare WireGuard identities even when a legacy registration used an
+    /// alternate encoding of the same X25519 u-coordinate.
+    pub fn x25519_coordinate(&self) -> [u8; 32] {
+        let mut coordinate = self.0;
+        coordinate[31] &= 0x7f;
+        if !canonical_public_key(&coordinate) {
+            // After masking, the only noncanonical values are p through p+18.
+            let low = coordinate[0] - 0xed;
+            coordinate = [0; 32];
+            coordinate[0] = low;
+        }
+        coordinate
     }
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -77,6 +96,8 @@ secret!(ServicePrivateKey);
 secret!(GatewayPrivateKey);
 secret!(DevicePrivateKey);
 secret!(TenantPrivateKey);
+secret!(EgressPrivateKey);
+secret!(PresharedKey);
 
 /// Permanent independent identities of one application instance. Workers receive
 /// only their own key; this aggregate belongs to the protected storage boundary.
@@ -105,4 +126,12 @@ impl NodeKeys {
         self.service.expose_bytes() == other.service.expose_bytes()
             && self.gateway.expose_bytes() == other.gateway.expose_bytes()
     }
+}
+
+/// True for canonical little-endian X25519 public field elements.
+pub fn canonical_public_key(key: &[u8; 32]) -> bool {
+    let mut modulus = [0xff; 32];
+    modulus[0] = 0xed;
+    modulus[31] = 0x7f;
+    key.iter().rev().cmp(modulus.iter().rev()) == std::cmp::Ordering::Less
 }

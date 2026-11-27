@@ -41,8 +41,8 @@ impl CommandHelp {
     }
 }
 
-const CONNECTION_DESCRIPTION: &str = "Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either --profile or both --socket and --credential-file. Connection options may appear anywhere after user, device, node or config. File ownership and permission checks still apply.";
-const GROUPS: &[&str] = &["node", "user", "device", "config", "api", "token"];
+const CONNECTION_DESCRIPTION: &str = "Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either --profile or both --socket and --credential-file. Connection options may appear anywhere after user, device, egress, node or config. File ownership and permission checks still apply.";
+const GROUPS: &[&str] = &["node", "user", "device", "egress", "config", "api", "token"];
 
 fn group_help(group: &str, commands: &[CommandHelp]) -> String {
     let mut out = format!("Usage: wgfeel {group} COMMAND\n\n");
@@ -60,7 +60,7 @@ fn group_help(group: &str, commands: &[CommandHelp]) -> String {
 /// Render help without opening state or connecting to a service.
 pub fn requested(args: &[OsString]) -> Option<String> {
     let path = if args.is_empty()
-        || matches!(args, [group] if group != "user" && group.to_str().is_some_and(|name| GROUPS.contains(&name)))
+        || matches!(args, [group] if group != "user" && group != "egress" && group.to_str().is_some_and(|name| GROUPS.contains(&name)))
     {
         args
     } else if args.first().is_some_and(|arg| arg == "help") {
@@ -102,7 +102,7 @@ pub fn requested(args: &[OsString]) -> Option<String> {
                     (parent == *group).then_some(action)
                 })
                 .collect::<Vec<_>>();
-            let hint = if *group == "user" {
+            let hint = if matches!(*group, "user" | "egress") {
                 " (or open the interactive menu)"
             } else {
                 ""
@@ -139,7 +139,7 @@ pub fn requested(args: &[OsString]) -> Option<String> {
             positional = true;
         }
     }
-    if GROUPS.contains(&path.as_str()) {
+    if GROUPS.contains(&path.as_str()) || path == "user egress" {
         return Some(group_help(&path, &commands));
     }
     let command = commands.into_iter().find(|c| c.name == path)?;

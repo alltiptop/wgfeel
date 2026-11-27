@@ -18,8 +18,9 @@ Phone ⇄ WireGuard ⇄ entry A ⇄ mesh ⇄ relay B ⇄ mesh ⇄ entry C ⇄ Wi
 
 Children keep forwarding accepted traffic during a `main` outage. Mesh failover
 repairs paths between nodes; moving a device off a failed home entry requires
-importing an updated client configuration. This is a routed private network,
-without broadcast discovery or an Internet exit.
+importing an updated client configuration. Each user has a routed private
+network. An administrator can also grant selected external routes or an
+Internet exit through an imported WireGuard egress profile.
 
 ## Build and install
 
@@ -62,6 +63,7 @@ wgfeel user                       # interactive administration menus on main
 wgfeel user add Alice             # creates user and first device, opens user menu
 wgfeel device add                 # select a user and add a device
 wgfeel device show                # print WireGuard client configuration
+wgfeel egress                     # import, inspect or place provider profiles
 wgfeel node list
 wgfeel config distribution        # applied configuration revisions per node
 ./wgfeel.new update --dry-run     # preview an upgrade from a new binary
@@ -72,8 +74,8 @@ wgfeel uninstall                  # keeps state; --purge requires confirmation
 
 Import a separate configuration into each device's WireGuard client. An `entry`
 `main` can serve devices on its own without any children. Installation also
-sets up `man wgfeel` and Bash/Zsh completion, including dynamic user, device
-and node IDs on `main`.
+sets up `man wgfeel` and Bash/Zsh completion, including dynamic user, device,
+egress and node IDs on `main`.
 
 ## Documentation
 

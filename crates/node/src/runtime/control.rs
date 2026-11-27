@@ -3,7 +3,9 @@ use super::{LocalGateway, WorkerOptions};
 use std::time::{Duration, Instant};
 use wgfeel_core::{DevicePublicKey, GatewayProjection, NodeId, TenantPrivateKey};
 use wgfeel_protocol::{Request, Response};
-use wgfeel_store::{GatewayDelivery, LocalTenants, Store, StoreError, StoredState};
+use wgfeel_store::{
+    GatewayDelivery, LocalEgressSecrets, LocalTenants, Store, StoreError, StoredState,
+};
 use wgfeel_wireguard::{
     Limits,
     worker::{LocalError, LocalEvent, WorkerError},
@@ -16,6 +18,21 @@ pub(super) fn options() -> WorkerOptions {
         operation_timeout: Duration::from_secs(2),
     }
 }
+pub(super) fn provider_keys<'a>(
+    projection: &'a GatewayProjection,
+    keys: &'a LocalEgressSecrets,
+) -> impl Iterator<
+    Item = (
+        &'a wgfeel_core::EgressId,
+        &'a wgfeel_core::EgressPrivateKey,
+        Option<&'a wgfeel_core::PresharedKey>,
+    ),
+> {
+    projection.owned_egresses().iter().filter_map(move |p| {
+        keys.get(&p.id)
+            .map(|k| (&p.id, k.private_key(), k.preshared_key()))
+    })
+}
 pub(super) fn spawn(state: &StoredState) -> Result<LocalGateway, &'static str> {
     let projection = state.projection();
     let tenants = state
@@ -23,11 +40,12 @@ pub(super) fn spawn(state: &StoredState) -> Result<LocalGateway, &'static str> {
         .network_ids()
         .filter_map(|id| state.local_tenants().private_key(id).map(|key| (id, key)));
     match state.management_public_key() {
-        Some(pin) => LocalGateway::spawn_managed(
+        Some(pin) => LocalGateway::spawn_with_egresses(
             projection,
             pin,
             state.node_keys(),
             tenants,
+            provider_keys(projection, state.egress_keys()),
             Limits::default(),
             options(),
         ),
@@ -46,7 +64,7 @@ pub(super) fn spawn(state: &StoredState) -> Result<LocalGateway, &'static str> {
 
 struct Candidate {
     gateway: LocalGateway,
-    tenants: LocalTenants,
+    delivery: GatewayDelivery,
     remaining: usize,
     deadline: Instant,
     prior: GatewayProjection,
@@ -155,6 +173,28 @@ impl Updates {
         {
             return Response::error(409, "revision_conflict");
         }
+        if delivery.is_none() && !next.owned_egresses().is_empty() {
+            return Response::error(422, "local_keys_unavailable");
+        }
+        if !transfer
+            && next.owned_egresses().iter().any(|p| {
+                current
+                    .owned_egresses()
+                    .iter()
+                    .find(|old| old.id == p.id)
+                    .is_some_and(|old| {
+                        p.secret_revision < old.secret_revision
+                            || (p.secret_revision == old.secret_revision
+                                && !delivery
+                                    .as_ref()
+                                    .and_then(|d| d.egress_keys().get(&p.id))
+                                    .zip(state.egress_keys().get(&p.id))
+                                    .is_some_and(|(a, b)| a.same_material(b)))
+                    })
+            })
+        {
+            return Response::error(409, "key_revision_conflict");
+        }
         if &next == current && !transfer {
             if delivery.as_ref().is_some_and(|delivery| {
                 delivery.keys().network_ids().any(|id| {
@@ -179,6 +219,12 @@ impl Updates {
         if let Some(pending) = &self.pending {
             let proposed = pending.gateway.projection();
             if &next == proposed {
+                if delivery.as_ref().is_some_and(|d| {
+                    !d.egress_keys()
+                        .same_material(pending.delivery.egress_keys())
+                }) {
+                    return Response::error(409, "key_revision_conflict");
+                }
                 return pending_response(next.generation());
             }
             if next.generation() <= proposed.generation() {
@@ -194,15 +240,23 @@ impl Updates {
             Ok(tenants) => tenants,
             Err(()) => return Response::error(422, "local_keys_unavailable"),
         };
+        let egress_keys = delivery
+            .map(GatewayDelivery::into_egress_keys)
+            .unwrap_or_default();
+        let Ok(delivery) = GatewayDelivery::from_parts(next.clone(), tenants, egress_keys) else {
+            return Response::error(422, "invalid_local_contexts");
+        };
         // Crypto validation and worker readiness precede the commit. The old
         // runtime continues forwarding while this isolated candidate starts.
-        let candidate = match gateway.prepare_replacement(
+        let candidate = match gateway.replace_with_egresses(
             &next,
             pin,
             state.node_keys(),
-            tenants
+            delivery
+                .keys()
                 .network_ids()
-                .filter_map(|id| tenants.private_key(id).map(|key| (id, key))),
+                .filter_map(|id| delivery.keys().private_key(id).map(|key| (id, key))),
+            provider_keys(&next, delivery.egress_keys()),
         ) {
             Ok(candidate) => candidate,
             Err(_) => return Response::error(422, "invalid_local_contexts"),
@@ -210,7 +264,7 @@ impl Updates {
         self.pending = Some(Candidate {
             remaining: candidate.starting_workers(),
             gateway: candidate,
-            tenants,
+            delivery,
             deadline: Instant::now() + Duration::from_secs(10),
             prior: current.clone(),
             prior_pin: state.management_public_key().cloned(),
@@ -270,21 +324,15 @@ impl Updates {
             return Ok(None);
         }
         let committed = if candidate.joined {
-            store.accept_manager_with_checkpoint(
+            store.accept_delivery_with_checkpoint(
                 &candidate.prior,
                 candidate.prior_pin.as_ref(),
-                handoff.projection(),
-                &candidate.tenants,
+                &candidate.delivery,
                 &candidate.pin,
                 |_| Ok(()),
             )
         } else {
-            store.commit_managed_projection(
-                handoff.projection(),
-                state.node_keys(),
-                &candidate.tenants,
-                &candidate.pin,
-            )
+            store.commit_managed_delivery(&candidate.delivery, state.node_keys(), &candidate.pin)
         };
         match committed {
             Ok(()) => (),

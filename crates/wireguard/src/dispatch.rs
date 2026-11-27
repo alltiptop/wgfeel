@@ -124,6 +124,13 @@ impl Registry {
         {
             return Err(DispatchError::LimitExceeded);
         }
+        if contexts
+            .iter()
+            .any(|c| matches!(c.context, ContextId::External(_)))
+            && (contexts.len() != 1 || contexts[0].peers != [PeerId::Provider])
+        {
+            return Err(DispatchError::InvalidConfiguration);
+        }
         let mut devices = 0usize;
         let mut nodes = 0usize;
         let mut gateways = 0usize;
@@ -169,6 +176,7 @@ impl Registry {
                     (&context.context, peer),
                     (ContextId::Tenant(_), PeerId::Device(_) | PeerId::Gateway(_))
                         | (ContextId::Service | ContextId::Gateway, PeerId::Node(_))
+                        | (ContextId::External(_), PeerId::Provider)
                 ) {
                     return Err(DispatchError::InvalidConfiguration);
                 }
@@ -340,7 +348,13 @@ impl Registry {
     /// Validate public framing and look up a destination hint only. MAC,
     /// handshake and transport authentication still belong to the engine path.
     pub fn route(&self, packet: &[u8]) -> Result<RouteHint, DispatchError> {
-        let Some(index) = framing::receiver_index(packet).map_err(|error| match error {
+        let Some(index) = framing::receiver_index_for(
+            packet,
+            self.contexts
+                .first()
+                .is_some_and(|c| matches!(c.id, ContextId::External(_))),
+        )
+        .map_err(|error| match error {
             WireGuardError::PacketTooLarge => DispatchError::PacketTooLarge,
             _ => DispatchError::InvalidPacket,
         })?

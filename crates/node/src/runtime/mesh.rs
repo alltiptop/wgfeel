@@ -67,7 +67,7 @@ impl Runtime {
                 traffic,
             } => self
                 .mesh
-                .transmit(&network, &peer, packet.as_bytes(), traffic, now),
+                .transmit_scoped(&network, &peer, packet.as_bytes(), traffic, now),
             _ => return,
         };
         self.enqueue(actions, now);

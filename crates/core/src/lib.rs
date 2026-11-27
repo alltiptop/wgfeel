@@ -5,6 +5,9 @@ use std::fmt;
 mod capabilities;
 mod change;
 mod config;
+mod egress;
+mod egress_policy;
+pub use egress_policy::*;
 mod identity;
 mod management;
 mod projection;
@@ -12,6 +15,7 @@ mod wire;
 pub use capabilities::*;
 pub use change::*;
 pub use config::*;
+pub use egress::*;
 pub use identity::*;
 pub use management::*;
 pub use projection::*;
@@ -55,6 +59,15 @@ pub enum DomainError {
     ProjectionTargetMismatch,
     InvalidProjection,
     InvalidMetadata,
+    InvalidEgress,
+    DuplicateEgressPrefix,
+    ConflictingDnsSelection,
+    NodeOutOfScope,
+    EgressNodeRequired,
+    EgressMovePending,
+    EgressInUse,
+    NodeOwnsEgresses,
+    EgressKeyPendingWithdrawal,
     InvalidClientOwnership,
 }
 impl fmt::Display for DomainError {

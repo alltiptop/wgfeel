@@ -14,6 +14,9 @@ use std::{
 
 #[path = "enrollment_acceptance.rs"]
 mod enrollment_acceptance;
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[path = "provider_socket.rs"]
+mod provider_socket;
 
 // The test owns only UDP sockets and child processes. Each advertised address
 // is a controllable link: no host firewall, interface or route is modified.

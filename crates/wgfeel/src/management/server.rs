@@ -403,6 +403,8 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
                     slot.peer = Some(peer);
                 }
             }
+            // Control events are drained from the applied worker before poll activates a successor.
+            let received_generation = tunnel.applied_generation();
             tunnel.poll_peers(|peer, packet| {
                 if let wgfeel_wireguard::PeerId::Node(id) = peer {
                     if id.as_str() == "administrator-api" {
@@ -414,7 +416,7 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
                     }) {
                         let _ = slot.tcp.receive(packet);
                     } else {
-                        distributor.receive(id, packet);
+                        distributor.receive(received_generation, id, packet);
                     }
                 }
             })?;

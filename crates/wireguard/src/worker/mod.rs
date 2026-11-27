@@ -7,7 +7,9 @@ mod protocol;
 mod supervisor;
 
 use crate::{ContextId, DatagramEvent, WireGuardError};
-pub use local::{DnsSource, EncryptedDatagram, LocalError, LocalEvent, LocalGateway};
+pub use local::{
+    DnsSource, EncryptedDatagram, LocalError, LocalEvent, LocalGateway, same_provider_session,
+};
 use std::{ffi::OsString, fmt, process::ExitCode, time::Duration};
 pub use supervisor::WorkerGateway;
 
@@ -108,6 +110,8 @@ fn worker_args(args: &[OsString]) -> Option<(ContextId, u64)> {
         ContextId::Service
     } else if context == "gateway" {
         ContextId::Gateway
+    } else if let Some(id) = context.strip_prefix("external:") {
+        ContextId::External(wgfeel_core::EgressId::new(id).ok()?)
     } else {
         ContextId::Tenant(wgfeel_core::NetworkId::new(context.strip_prefix("tenant:")?).ok()?)
     };

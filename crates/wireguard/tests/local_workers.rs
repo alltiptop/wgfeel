@@ -431,6 +431,498 @@ fn udp(ipv6: bool, source: &str, destination: &str, hops: u8, marker: u8) -> Vec
     bytes
 }
 
+fn external_profile(id: &wgfeel_core::EgressId, owner: &NodeId) -> wgfeel_core::EgressProfile {
+    wgfeel_core::EgressProfileFields {
+        id: id.clone(),
+        name: "provider".into(),
+        node: Some(owner.clone()),
+        pending_node: None,
+        secret_revision: 1,
+        interface_public_key: public(50),
+        peer_public_key: public(51),
+        endpoint: "192.0.2.50:51820".parse().unwrap(),
+        addresses: vec!["172.16.4.2".parse().unwrap()],
+        allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
+        dns_servers: vec![],
+        mtu: None,
+        persistent_keepalive: None,
+        has_preshared_key: true,
+    }
+    .try_into()
+    .unwrap()
+}
+
+fn establish_provider(fixture: &mut Fixture, egress: &wgfeel_core::EgressId) -> Client {
+    let external = ContextId::External(egress.clone());
+    let mut provider = Client::new("unused", "provider", 51, 50);
+    provider.context = external.clone();
+    provider.peer = PeerId::Provider;
+    provider.engine = Tunn::new(
+        StaticSecret::from(seed(51)),
+        PublicKey::from(*public(50).as_bytes()),
+        Some(seed(52)),
+        None,
+        IndexTable::from_os_rng(),
+        Arc::clone(&provider.limiter),
+    );
+    assert!(fixture.gateway.provider_authenticated(egress).is_none());
+    let hello = provider.initiate();
+    assert!(
+        fixture
+            .gateway
+            .receive_datagram(provider.address, &hello)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .gateway
+            .receive_provider(egress, provider.address, &hello)
+            .unwrap()
+            .is_none()
+    );
+    let LocalEvent::ProviderOutput(output) = fixture.event() else {
+        panic!("provider handshake must stay on its connected socket")
+    };
+    let TunnResult::WriteToNetwork(confirm) =
+        provider.receive(server(), &encrypted(output, &provider))
+    else {
+        panic!("wrong provider key or PSK")
+    };
+    let confirm: Packet = confirm.into();
+    assert!(
+        fixture
+            .gateway
+            .receive_datagram(provider.address, confirm.as_ref())
+            .is_err()
+    );
+    fixture
+        .gateway
+        .receive_provider(egress, provider.address, confirm.as_ref())
+        .unwrap();
+    fixture.wait_idle(&external);
+    assert!(fixture.gateway.provider_authenticated(egress).is_some());
+    provider
+}
+
+fn native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation() {
+    use wgfeel_core::{
+        EgressDnsSelection, EgressId, EgressPolicy, UserEgressAssignment, UserEgresses,
+    };
+    let egress = EgressId::new("vpn").unwrap();
+    let net = network("alice");
+    let main = node("main");
+    let alice = Device::new(
+        device("phone"),
+        public(23),
+        vec!["10.203.0.9".parse().unwrap()],
+    )
+    .unwrap()
+    .with_gateway(Some(main.clone()));
+    let assignment = GatewayAssignment::new(
+        main.clone(),
+        public(9),
+        wgfeel_test_support::fixture_gateway_public(&public(9)),
+        vec![net.clone()],
+        vec![TenantKeyAssignment::new(net.clone(), public(1))],
+    )
+    .unwrap()
+    .with_endpoint(Some(server()))
+    .unwrap();
+    let make_projection = |generation, profile| {
+        ManagementConfig::new(
+            main.clone(),
+            Config::new(
+                generation,
+                vec![Network::new(net.clone(), vec![alice.clone()]).unwrap()],
+                Policy::new(vec![], vec![], vec![]),
+            )
+            .unwrap(),
+            vec![assignment.clone()],
+        )
+        .unwrap()
+        .with_egress_policy(EgressPolicy {
+            profiles: vec![profile],
+            users: vec![UserEgresses {
+                user: wgfeel_core::ClientId::new("alice").unwrap(),
+                network: net.clone(),
+                egresses: vec![UserEgressAssignment {
+                    egress_id: egress.clone(),
+                    routes: vec!["0.0.0.0/0".parse().unwrap()],
+                    dns: EgressDnsSelection::None {},
+                }],
+            }],
+            reservations: vec![],
+        })
+        .unwrap()
+        .project_mesh_for(&main)
+        .unwrap()
+    };
+    let profile = external_profile(&egress, &main);
+    let projection = make_projection(1, profile.clone());
+    let interface = wgfeel_core::EgressPrivateKey::new(seed(50)).unwrap();
+    let shared = wgfeel_core::PresharedKey::new(seed(52)).unwrap();
+    let tenant = TenantPrivateKey::new(seed(1)).unwrap();
+    let node_keys = wgfeel_test_support::fixture_node_keys(seed(9));
+    let gateway = LocalGateway::spawn_with_egresses(
+        &projection,
+        &public(9),
+        &node_keys,
+        [(&net, &tenant)],
+        [(&egress, &interface, Some(&shared))],
+        Limits::default(),
+        options(),
+    )
+    .unwrap();
+    let mut fixture = Fixture {
+        gateway,
+        clients: vec![Client::new("alice", "phone", 23, 1)],
+    };
+    fixture.ready();
+    fixture.establish(0);
+    let mut provider = establish_provider(&mut fixture, &egress);
+    let packet = udp(false, "10.203.0.9", "203.0.113.23", 64, 73);
+    fixture.submit(0, &packet);
+    let LocalEvent::ProviderOutput(output) = fixture.event() else {
+        panic!("missing translated provider output")
+    };
+    let TunnResult::WriteToTunnel(translated) =
+        provider.receive(server(), &encrypted(output, &provider))
+    else {
+        panic!("provider could not authenticate packet")
+    };
+    assert_eq!(&translated[12..16], &[172, 16, 4, 2]);
+    assert_eq!(&translated[16..20], &[203, 0, 113, 23]);
+    assert_eq!(translated[8], 63);
+    let port = translated[20..22].to_vec();
+    assert_ne!(port, packet[20..22]);
+    let next = make_projection(2, profile.clone());
+    let mut candidate = fixture
+        .gateway
+        .replace_with_egresses(
+            &next,
+            &public(9),
+            &node_keys,
+            [(&net, &tenant)],
+            [(&egress, &interface, Some(&shared))],
+        )
+        .unwrap();
+    assert_eq!(candidate.starting_workers(), 0);
+    candidate
+        .handoff(&mut fixture.gateway)
+        .unwrap()
+        .activate()
+        .unwrap();
+    let mut reply = udp(false, "203.0.113.23", "172.16.4.2", 63, 41);
+    reply[20..22].copy_from_slice(&packet[22..24]);
+    reply[22..24].copy_from_slice(&port);
+    reply[26..28].fill(0);
+    let reply = provider.encrypt(&reply);
+    assert!(
+        fixture
+            .gateway
+            .receive_datagram(provider.address, &reply)
+            .is_err()
+    );
+    fixture
+        .gateway
+        .receive_provider(&egress, provider.address, &reply)
+        .unwrap();
+    let LocalEvent::Network(output) = fixture.event() else {
+        panic!("missing native client reply")
+    };
+    let TunnResult::WriteToTunnel(reply) =
+        fixture.clients[0].receive(server(), output.packet.as_bytes())
+    else {
+        panic!("reply did not authenticate")
+    };
+    assert_eq!(&reply[16..20], &[10, 203, 0, 9]);
+    assert_eq!(&reply[22..24], &packet[20..22]);
+    assert_eq!(reply[8], 62);
+    let rotated_key = wgfeel_core::PresharedKey::new(seed(53)).unwrap();
+    assert!(
+        fixture
+            .gateway
+            .replace_with_egresses(
+                &make_projection(3, profile.clone()),
+                &public(9),
+                &node_keys,
+                [(&net, &tenant)],
+                [(&egress, &interface, Some(&rotated_key))]
+            )
+            .is_err(),
+        "changed PSK must advance its own revision"
+    );
+    let rotated = profile.clone().with_secret_revision(2).unwrap();
+    let mut replacement = fixture
+        .gateway
+        .replace_with_egresses(
+            &make_projection(3, rotated.clone()),
+            &public(9),
+            &node_keys,
+            [(&net, &tenant)],
+            [(&egress, &interface, Some(&rotated_key))],
+        )
+        .unwrap();
+    assert_eq!(
+        replacement.starting_workers(),
+        1,
+        "only the provider worker should restart"
+    );
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(event) = replacement.poll() {
+            assert!(matches!(
+                event,
+                LocalEvent::Ready {
+                    context: ContextId::External(_),
+                    ..
+                }
+            ));
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    replacement
+        .handoff(&mut fixture.gateway)
+        .unwrap()
+        .activate()
+        .unwrap();
+    drop(replacement);
+    let stale = provider.encrypt(&packet);
+    assert!(
+        fixture
+            .gateway
+            .receive_provider(&egress, provider.address, &stale)
+            .is_err(),
+        "a replaced worker cannot inherit receiver indices"
+    );
+    let detached = make_projection(4, rotated.with_placement(None, None).unwrap());
+    let mut replacement = fixture
+        .gateway
+        .replace_with_egresses(&detached, &public(9), &node_keys, [(&net, &tenant)], [])
+        .unwrap();
+    assert_eq!(replacement.starting_workers(), 0);
+    replacement
+        .handoff(&mut fixture.gateway)
+        .unwrap()
+        .activate()
+        .unwrap();
+    drop(replacement);
+    assert!(
+        fixture
+            .gateway
+            .workers()
+            .iter()
+            .all(|w| !matches!(w.context, ContextId::External(_)))
+    );
+    assert!(
+        fixture
+            .gateway
+            .receive_provider(&egress, provider.address, &stale)
+            .is_err()
+    );
+}
+
+fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner() {
+    use wgfeel_core::{
+        EgressDnsSelection, EgressId, EgressPolicy, UserEgressAssignment, UserEgresses,
+    };
+    use wgfeel_wireguard::mesh::{Direction, MeshTraffic};
+    let home = node("home");
+    let owner = node("owner");
+    let net = network("alice");
+    let egress = EgressId::new("vpn").unwrap();
+    let alice = Device::new(
+        device("phone"),
+        public(23),
+        vec!["10.203.0.9".parse().unwrap()],
+    )
+    .unwrap()
+    .with_gateway(Some(home.clone()));
+    let assignments = [
+        (&home, 9, 1, server()),
+        (&owner, 10, 2, "198.51.100.2:51820".parse().unwrap()),
+    ]
+    .map(|(node, key, tenant, addr)| {
+        GatewayAssignment::new(
+            node.clone(),
+            public(key),
+            wgfeel_test_support::fixture_gateway_public(&public(key)),
+            vec![net.clone()],
+            vec![TenantKeyAssignment::new(net.clone(), public(tenant))],
+        )
+        .unwrap()
+        .with_endpoint(Some(addr))
+        .unwrap()
+    });
+    let routing = ManagementConfig::new(
+        home.clone(),
+        Config::new(
+            1,
+            vec![Network::new(net.clone(), vec![alice]).unwrap()],
+            Policy::new(vec![], vec![], vec![]),
+        )
+        .unwrap(),
+        assignments.to_vec(),
+    )
+    .unwrap()
+    .with_egress_policy(EgressPolicy {
+        profiles: vec![external_profile(&egress, &owner)],
+        users: vec![UserEgresses {
+            user: wgfeel_core::ClientId::new("alice").unwrap(),
+            network: net.clone(),
+            egresses: vec![UserEgressAssignment {
+                egress_id: egress.clone(),
+                routes: vec!["0.0.0.0/0".parse().unwrap()],
+                dns: EgressDnsSelection::None {},
+            }],
+        }],
+        reservations: vec![],
+    })
+    .unwrap();
+    let mut gateways: Vec<_> = [(&home, 9, 1), (&owner, 10, 2)]
+        .iter()
+        .map(|(node, key, tenant)| {
+            let projection = routing.project_mesh_for(node).unwrap();
+            let interface = wgfeel_core::EgressPrivateKey::new(seed(50)).unwrap();
+            let psk = wgfeel_core::PresharedKey::new(seed(52)).unwrap();
+            let providers = (*node == &owner).then_some((&egress, &interface, Some(&psk)));
+            let gateway = LocalGateway::spawn_with_egresses(
+                &projection,
+                &public(9),
+                &wgfeel_test_support::fixture_node_keys(seed(*key)),
+                [(&net, &TenantPrivateKey::new(seed(*tenant)).unwrap())],
+                providers,
+                Limits::default(),
+                options(),
+            )
+            .unwrap();
+            let mut fixture = Fixture {
+                gateway,
+                clients: vec![Client::new("alice", "phone", 23, 1)],
+            };
+            fixture.ready();
+            fixture
+        })
+        .collect();
+    let mut exit = gateways.pop().unwrap();
+    let mut entry = gateways.pop().unwrap();
+    entry.establish(0);
+    let mut provider = establish_provider(&mut exit, &egress);
+    let context = ContextId::Tenant(net.clone());
+    entry
+        .gateway
+        .initiate_at(
+            &context,
+            &PeerId::Gateway(owner.clone()),
+            assignments[1].endpoint().unwrap(),
+        )
+        .unwrap();
+    for outbound in [true, false, true] {
+        let (sender, receiver, origin) = if outbound {
+            (&mut entry, &mut exit, &home)
+        } else {
+            (&mut exit, &mut entry, &owner)
+        };
+        let LocalEvent::MeshOutput {
+            packet,
+            traffic: None,
+            ..
+        } = sender.event()
+        else {
+            panic!("tenant handshake missing")
+        };
+        receiver
+            .gateway
+            .receive_mesh(&net, origin, packet.as_bytes(), None)
+            .unwrap();
+    }
+    exit.wait_idle(&context);
+    let packet = udp(false, "10.203.0.9", "203.0.113.23", 64, 73);
+    entry.submit(0, &packet);
+    let LocalEvent::MeshOutput {
+        packet: unlabelled,
+        traffic: Some(MeshTraffic::External(_)),
+        ..
+    } = entry.event()
+    else {
+        panic!("missing egress frame")
+    };
+    assert!(
+        exit.gateway
+            .receive_datagram(server(), unlabelled.as_bytes())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        matches!(exit.event(), LocalEvent::Dropped { .. }),
+        "raw inter-entry input must not reach the provider"
+    );
+    entry.submit(0, &packet);
+    let LocalEvent::MeshOutput {
+        packet: wire,
+        traffic: Some(MeshTraffic::External(to)),
+        ..
+    } = entry.event()
+    else {
+        panic!("missing typed egress output")
+    };
+    assert_eq!(to.direction, Direction::ToEgress);
+    exit.gateway
+        .receive_mesh(
+            &net,
+            &home,
+            wire.as_bytes(),
+            Some(MeshTraffic::External(to)),
+        )
+        .unwrap();
+    let LocalEvent::ProviderOutput(out) = exit.event() else {
+        panic!("provider did not receive remotely originated traffic")
+    };
+    let TunnResult::WriteToTunnel(translated) = provider.receive(server(), out.packet.as_bytes())
+    else {
+        panic!("provider could not authenticate")
+    };
+    assert_eq!(&translated[12..16], &[172, 16, 4, 2]);
+    let mut reply = udp(false, "203.0.113.23", "172.16.4.2", 63, 45);
+    reply[20..22].copy_from_slice(&packet[22..24]);
+    reply[22..24].copy_from_slice(&translated[20..22]);
+    reply[26..28].fill(0);
+    let wire = provider.encrypt(&reply);
+    exit.gateway
+        .receive_provider(&egress, provider.address, &wire)
+        .unwrap();
+    let LocalEvent::MeshOutput {
+        packet: wire,
+        traffic: Some(MeshTraffic::External(from)),
+        ..
+    } = exit.event()
+    else {
+        panic!("missing typed return")
+    };
+    assert_eq!(from.direction, Direction::FromEgress);
+    entry
+        .gateway
+        .receive_mesh(
+            &net,
+            &owner,
+            wire.as_bytes(),
+            Some(MeshTraffic::External(from)),
+        )
+        .unwrap();
+    let LocalEvent::Network(out) = entry.event() else {
+        panic!("home denied legitimate provider return")
+    };
+    let TunnResult::WriteToTunnel(response) =
+        entry.clients[0].receive(server(), out.packet.as_bytes())
+    else {
+        panic!("device could not authenticate reply")
+    };
+    assert_eq!(&response[16..20], &[10, 203, 0, 9]);
+    assert_eq!(response[8], 62);
+}
+
 fn projection_pins_and_exact_local_keys_are_required_before_workers_start() {
     let projection = projection(
         41,
@@ -1171,6 +1663,14 @@ fn main() -> ExitCode {
         return status;
     }
     let cases: &[(&str, fn())] = &[
+        (
+            "remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner",
+            remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner,
+        ),
+        (
+            "native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation",
+            native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation,
+        ),
         (
             "projection_pins_and_exact_local_keys_are_required_before_workers_start",
             projection_pins_and_exact_local_keys_are_required_before_workers_start,

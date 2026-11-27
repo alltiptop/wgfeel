@@ -37,6 +37,7 @@ enum Phase {
     Failed,
 }
 struct Worker {
+    provider_authenticated: Option<Instant>,
     context: ContextId,
     public_key: DevicePublicKey,
     peers: Vec<Peer>,
@@ -105,10 +106,42 @@ impl Expected {
 /// fresh confined process. Raw plaintext still needs source binding and ACLs.
 pub struct WorkerGateway {
     workers: Vec<Worker>,
-    router: Router,
+    router: WorkerRouters,
     options: WorkerOptions,
     limits: Limits,
     cursor: usize,
+}
+// Only the shared router is reachable from the application's public UDP listener.
+// Each connected provider socket owns a separate MAC1 / receiver-index namespace.
+struct WorkerRouters {
+    public: Router,
+    public_count: usize,
+    external: Vec<Router>,
+}
+
+impl WorkerRouters {
+    fn get(&self, slot: usize) -> (&Router, usize) {
+        if slot < self.public_count {
+            (&self.public, slot)
+        } else {
+            (&self.external[slot - self.public_count], 0)
+        }
+    }
+    fn get_mut(&mut self, slot: usize) -> (&mut Router, usize) {
+        if slot < self.public_count {
+            (&mut self.public, slot)
+        } else {
+            (&mut self.external[slot - self.public_count], 0)
+        }
+    }
+    fn generation(&self, slot: usize) -> u64 {
+        let (router, i) = self.get(slot);
+        router.generation(i)
+    }
+    fn release(&mut self, slot: usize) -> Result<(), WireGuardError> {
+        let (router, i) = self.get_mut(slot);
+        router.release(i)
+    }
 }
 impl fmt::Debug for WorkerGateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -130,7 +163,7 @@ impl WorkerGateway {
         limits: Limits,
         options: WorkerOptions,
     ) -> Result<Self, WorkerError> {
-        Self::prepare(configs, limits, options, None, false)
+        Self::prepare(configs, limits, options, None, false, &[])
     }
 
     pub(super) fn replacement(
@@ -138,6 +171,7 @@ impl WorkerGateway {
         configs: Vec<ContextConfig>,
         retain: bool,
         main: bool,
+        reusable_external: &[wgfeel_core::EgressId],
     ) -> Result<Self, WorkerError> {
         Self::prepare(
             configs,
@@ -145,6 +179,7 @@ impl WorkerGateway {
             self.options,
             retain.then_some(self),
             main,
+            reusable_external,
         )
     }
 
@@ -154,11 +189,14 @@ impl WorkerGateway {
         options: WorkerOptions,
         previous: Option<&Self>,
         main: bool,
+        reusable_external: &[wgfeel_core::EgressId],
     ) -> Result<Self, WorkerError> {
+        let mut configs = configs;
+        configs.sort_by_key(|c| matches!(c.id, ContextId::External(_)));
         validate_options(options)?;
         let public_keys =
             validate_context_configs(&configs, limits).map_err(WorkerError::WireGuard)?;
-        let metadata = configs
+        let mut metadata: Vec<_> = configs
             .iter()
             .zip(&public_keys)
             .map(|(config, key)| {
@@ -174,7 +212,18 @@ impl WorkerGateway {
                 )
             })
             .collect();
-        let router = Router::new(metadata).map_err(WorkerError::WireGuard)?;
+        let public_count = configs.partition_point(|c| !matches!(c.id, ContextId::External(_)));
+        let external = metadata
+            .split_off(public_count)
+            .into_iter()
+            .map(|entry| Router::new(vec![entry]))
+            .collect::<Result<_, _>>()
+            .map_err(WorkerError::WireGuard)?;
+        let router = WorkerRouters {
+            public: Router::new(metadata).map_err(WorkerError::WireGuard)?,
+            external,
+            public_count,
+        };
         let mut gateway = Self {
             workers: Vec::with_capacity(configs.len()),
             router,
@@ -187,6 +236,7 @@ impl WorkerGateway {
             let retained = previous.and_then(|previous| {
                 previous.workers.iter().enumerate().find(|(_, old)| {
                     old.context == config.id
+                        && !matches!(&config.id, ContextId::External(id) if !reusable_external.contains(id))
                         && old.public_key == key
                         && matches!(old.phase, Phase::Idle | Phase::Pending(_))
                         && ((main && config.id == ContextId::Service)
@@ -198,6 +248,7 @@ impl WorkerGateway {
             });
             let worker = if let Some((old_slot, old)) = retained {
                 Worker {
+                    provider_authenticated: None,
                     context: config.id,
                     public_key: key,
                     peers: Vec::new(),
@@ -237,8 +288,10 @@ impl WorkerGateway {
                 {
                     return Err(WorkerError::NotReady);
                 }
-                self.router
-                    .prepare_routes(slot, &previous.router, old_slot)
+                let (router, idx) = self.router.get_mut(slot);
+                let (old_router, old_idx) = previous.router.get(old_slot);
+                router
+                    .prepare_routes(idx, old_router, old_idx)
                     .map_err(WorkerError::WireGuard)?;
             } else {
                 worker.ready()?;
@@ -253,8 +306,10 @@ impl WorkerGateway {
         let mut inherited = Vec::new();
         for (slot, worker) in self.workers.iter_mut().enumerate() {
             if let Phase::Inherit { old_slot } = worker.phase {
-                self.router
-                    .move_admission(slot, &mut previous.router, old_slot)
+                let (router, idx) = self.router.get_mut(slot);
+                let (old_router, old_idx) = previous.router.get_mut(old_slot);
+                router
+                    .move_admission(idx, old_router, old_idx)
                     .map_err(WorkerError::WireGuard)?;
                 std::mem::swap(worker, &mut previous.workers[old_slot]);
                 let generation = self.router.generation(slot);
@@ -287,14 +342,16 @@ impl WorkerGateway {
     }
     /// Wait for worker pipe activity or caller-owned readable descriptors.
     /// No bytes are consumed and no worker state changes; call poll afterwards
-    /// to process readiness, child exit and deadlines. At most eight external
+    /// to process readiness, child exit and deadlines. At most eighteen external
     /// descriptors and sixty seconds are accepted, including a zero timeout.
     pub fn wait_for_activity(
         &self,
         readable: &[BorrowedFd<'_>],
         maximum: Duration,
     ) -> Result<(), WorkerError> {
-        if readable.len() > 8 || maximum > Duration::from_secs(60) {
+        if readable.len() > 2 + wgfeel_core::MAX_EGRESSES_PER_NODE
+            || maximum > Duration::from_secs(60)
+        {
             return Err(WorkerError::InvalidConfiguration);
         }
         let mut descriptors = Vec::with_capacity(self.workers.len() * 2 + readable.len());
@@ -394,11 +451,24 @@ impl WorkerGateway {
         expected: Option<(usize, &PeerId)>,
     ) -> Result<Submission, WorkerError> {
         validate_endpoint(source).map_err(WorkerError::WireGuard)?;
-        let admission = self
-            .router
-            .admit_scoped(source, bytes, expected)
-            .map_err(WorkerError::WireGuard)?;
-        let slot = admission.slot;
+        let (admission, slot) = match expected {
+            Some((slot, peer)) => {
+                let (router, index) = self.router.get_mut(slot);
+                let admission = router
+                    .admit_scoped(source, bytes, Some((index, peer)))
+                    .map_err(WorkerError::WireGuard)?;
+                (admission, slot)
+            }
+            None => {
+                let admission = self
+                    .router
+                    .public
+                    .admit_scoped(source, bytes, None)
+                    .map_err(WorkerError::WireGuard)?;
+                let slot = admission.slot;
+                (admission, slot)
+            }
+        };
         self.workers[slot].ready()?;
         match admission.verified {
             Verification::Challenge(packet) => {
@@ -540,7 +610,8 @@ impl WorkerGateway {
         // Revocation precedes replacement. Spawn failure leaves only this
         // context failed and without receiver routes; no automatic retry.
         self.fail(slot, WorkerError::NotReady);
-        self.router.restart(slot).map_err(WorkerError::WireGuard)?;
+        let (router, idx) = self.router.get_mut(slot);
+        router.restart(idx).map_err(WorkerError::WireGuard)?;
         let generation = self.router.generation(slot);
         match Worker::spawn(
             config,
@@ -567,6 +638,12 @@ impl WorkerGateway {
         let (slot, peer) = self.select(context, peer)?;
         Ok(self.workers[slot].peers[usize::from(peer)].endpoint)
     }
+    pub(super) fn provider_authenticated(&self, id: &wgfeel_core::EgressId) -> Option<Instant> {
+        self.workers
+            .iter()
+            .find(|w| matches!(&w.context,ContextId::External(e) if e==id))?
+            .provider_authenticated
+    }
     pub(super) fn generation_is_active(&self, context: &ContextId, generation: u64) -> bool {
         self.workers.iter().any(|worker| {
             &worker.context == context
@@ -586,6 +663,7 @@ impl WorkerGateway {
             (ContextId::Tenant(_), PrivateKey::Tenant(_))
                 | (ContextId::Service, PrivateKey::Service(_))
                 | (ContextId::Gateway, PrivateKey::Gateway(_))
+                | (ContextId::External(_), PrivateKey::External { .. })
         ) {
             return Err(WorkerError::InvalidConfiguration);
         }
@@ -634,10 +712,13 @@ impl WorkerGateway {
         let next = sequence
             .checked_add(1)
             .ok_or(WorkerError::SequenceExhausted)?;
-        let bytes = protocol::encode_request(&Request {
-            sequence,
-            operation,
-        })
+        let bytes = protocol::encode_request_scoped(
+            matches!(worker.context, ContextId::External(_)),
+            &Request {
+                sequence,
+                operation,
+            },
+        )
         .map_err(|_| WorkerError::Protocol)?;
         let request = RequestId {
             context: worker.context.clone(),
@@ -684,7 +765,9 @@ impl WorkerGateway {
             worker.phase = Phase::Bootstrap;
             return Ok(None);
         }
-        let reply = protocol::decode_reply(&body).map_err(|_| WorkerError::Protocol)?;
+        let reply =
+            protocol::decode_reply_scoped(matches!(worker.context, ContextId::External(_)), &body)
+                .map_err(|_| WorkerError::Protocol)?;
         if matches!(worker.phase, Phase::Bootstrap) {
             if reply.sequence != 0
                 || !reply.indices.is_empty()
@@ -716,6 +799,7 @@ impl WorkerGateway {
                 })
                 .collect();
             self.router
+                .public
                 .replace_service_peers(
                     slot,
                     peers.iter().map(|peer| peer.id.clone()).collect(),
@@ -746,8 +830,9 @@ impl WorkerGateway {
                 peer: worker.peers[usize::from(binding.peer)].id.clone(),
             })
             .collect();
-        self.router
-            .publish_worker(slot, bindings)
+        let (router, idx) = self.router.get_mut(slot);
+        router
+            .publish_worker(idx, bindings)
             .map_err(|error| match error {
                 DispatchError::IndexCollision => WorkerError::IndexCollision,
                 _ => WorkerError::Protocol,
@@ -760,9 +845,13 @@ impl WorkerGateway {
             (&pending.operation, reply.authenticated_peer)
         {
             worker.peers[usize::from(peer)].endpoint = Some(*source);
+            if matches!(worker.context, ContextId::External(_)) {
+                worker.provider_authenticated = Some(Instant::now());
+            }
         }
         if let Expected::Reset { peer } = &pending.operation {
             worker.peers[usize::from(*peer)].endpoint = None;
+            worker.provider_authenticated = None;
         }
         let result = reply.outcome.and_then(|output| {
             output
@@ -793,6 +882,7 @@ impl WorkerGateway {
         let _ = self.router.release(slot);
         let worker = &mut self.workers[slot];
         worker.phase = Phase::Failed;
+        worker.provider_authenticated = None;
         worker.deadline = None;
         worker.bootstrap = None;
         for peer in &mut worker.peers {
@@ -819,6 +909,7 @@ impl Worker {
         let deadline = Instant::now() + options.startup_timeout;
         let process = Process::spawn(&config.id, options.address_space_bytes)?;
         Ok(Self {
+            provider_authenticated: None,
             context: config.id,
             public_key,
             generation,
@@ -940,7 +1031,12 @@ fn validate_reply(worker: &Worker, pending: &Pending, reply: &Reply) -> Result<(
             {
                 return Err(WorkerError::Protocol);
             }
-            framing::ip_length(packet, false).map_err(|_| WorkerError::Protocol)?;
+            framing::ip_length_for(
+                packet,
+                false,
+                matches!(worker.context, ContextId::External(_)),
+            )
+            .map_err(|_| WorkerError::Protocol)?;
         }
         Output::Network { packet, .. } => {
             framing::datagram(packet).map_err(|_| WorkerError::Protocol)?;

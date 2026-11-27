@@ -84,7 +84,7 @@ Connection: close
 - `POST /api/v1/node-invitations` does not change the configuration revision.
   `If-Match` is optional; when provided, it is checked at issuance (`400`/`412`)
   without reserving that revision for later enrollment.
-- **All `POST` requests**—including empty-body requests such as
+- **All `POST` and `PUT` requests**—including empty-body requests such as
   `POST /api/v1/token/rotate` and `POST /api/v1/node-invitations`—must send
   exact `Content-Type: application/json` (`415` otherwise) and `Content-Length`
   (`411` otherwise).
@@ -109,10 +109,42 @@ Full request/response schemas and error codes are in [openapi.json](openapi.json
 | `GET`, `POST /api/v1/users/{user}/devices` | List or provision devices for a user |
 | `GET`, `DELETE /api/v1/users/{user}/devices/{device}` | Read metadata or delete a device |
 | `GET /api/v1/users/{user}/devices/{device}/config` | Export WireGuard config (`text/plain`, contains private key; optional `/{network}` suffix) |
+| `GET`, `POST /api/v1/egresses` | List profiles or atomically import a provider profile, placement and initial user assignments |
+| `GET`, `PUT`, `DELETE /api/v1/egresses/{egress}` | Read public metadata, replace the provider config or delete the profile |
+| `GET`, `PUT /api/v1/egresses/{egress}/node` | Inspect placement, attach, move or unassign a profile |
+| `GET`, `PUT /api/v1/users/{user}/egresses` | List or atomically replace a user's assignments |
+| `PUT`, `DELETE /api/v1/users/{user}/egresses/{egress}` | Set or remove one assignment |
 | `GET`, `POST /api/v1/gateways` | List registered nodes or register one manually |
 | `GET`, `DELETE /api/v1/gateways/{gateway}` | Read or remove a registered node |
 | `POST /api/v1/node-invitations` | Issue a one-time child enrollment invitation |
 | `POST /api/v1/token/rotate` | Rotate the bearer token (available over REST with the current bearer token; the CLI `wgfeel token rotate` is local-only) |
+
+## Save an external WireGuard profile
+
+Send the contents of a single-peer WireGuard profile in the JSON string `config`
+to `POST /api/v1/egresses`. The decoded profile can contain up to 16 KiB.
+The optional `name` defaults to the peer endpoint host. A successful import
+returns `201` with the generated egress ID and the new configuration revision.
+
+Omit `node` to save the profile unassigned on `main`. To grant initial
+access in the import transaction, include an eligible `node` and a `users`
+array. Each item contains `user`, explicit CIDRs in `routes` and a DNS
+selection. These statements use the revision in `If-Match`. If any item
+fails validation, the import leaves the prior configuration intact.
+
+`PUT /api/v1/egresses/{egress}/node` takes `{"node":"entry-b"}` to attach
+or move a profile and `{"node":null}` to detach it. HTTP 202 means the
+former node must acknowledge withdrawal. Inspect the node resource for
+`former_node`, `pending_node` and `withdrawal_generation`. Existing assignments
+remain dormant during the handoff.
+
+For example, a single-assignment update uses
+`{"routes":["10.40.0.0/16"],"dns":{"mode":"zones","zones":["corp.example"]}}`.
+DNS also accepts `{"mode":"none"}` and `{"mode":"default"}`. For an
+atomic swap of assignments, PUT the collection with an `egresses` array
+whose items also include `egress_id`. Use `[]` to remove every assignment.
+Provider keys are write-only. Re-export affected devices after changing
+their routes or DNS.
 
 ## Device configurations
 

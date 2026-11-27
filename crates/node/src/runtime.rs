@@ -25,6 +25,7 @@ use wgfeel_wireguard::{
 
 mod control;
 mod dns;
+mod egress;
 mod enrollment;
 mod main;
 mod mesh;
@@ -85,6 +86,7 @@ impl Logger {
                             generation,
                         } => {
                             let context = match context {
+                                ContextId::External(id) => format!("external:{}", id.as_str()),
                                 ContextId::Tenant(id) => format!("tenant:{}", id.as_str()),
                                 ContextId::Service => "service".into(),
                                 ContextId::Gateway => "gateway".into(),
@@ -263,6 +265,7 @@ fn serve(
     let mut enrollment_outgoing = std::collections::VecDeque::new();
     let mut outgoing = std::collections::VecDeque::new();
     let mut mesh = mesh::Runtime::new(gateway.projection())?;
+    let mut egress = egress::Runtime::new(&gateway);
     let mut dns = dns::Runtime::default();
     let mut updates = control::Updates::default();
     let mut buffer = [0; MAX_DATAGRAM_SIZE + 1];
@@ -324,6 +327,7 @@ fn serve(
         // monopolize a worker before every queued inbound handshake is read.
         for _ in 0..BATCH {
             match gateway.poll() {
+                Some(LocalEvent::ProviderOutput(datagram)) => egress.send(&mut gateway, datagram),
                 Some(LocalEvent::Network(datagram)) => {
                     if datagram.context == ContextId::Service
                         && gateway
@@ -348,6 +352,7 @@ fn serve(
                     generation,
                     ..
                 }) => {
+                    egress.failed(&context);
                     if let Some(timer) = timers.iter_mut().find(|timer| timer.context == context) {
                         timer.failed = true;
                     }
@@ -444,6 +449,11 @@ fn serve(
             enrollment_tcp
                 .reset_session()
                 .map_err(|_| "cannot reset committed enrollment transport")?;
+            if matches!(activation, control::Activation::NewAuthority) {
+                egress = egress::Runtime::new(&gateway);
+            } else {
+                egress.configure(&gateway);
+            }
             mesh = match activation {
                 control::Activation::SameAuthority => mesh.replacement(gateway.projection())?,
                 control::Activation::NewAuthority => mesh::Runtime::new(gateway.projection())?,
@@ -451,6 +461,7 @@ fn serve(
             dns.reset();
         }
         let now = Instant::now();
+        egress.poll(&mut gateway);
         mesh.poll(&mut gateway, &socket, start.elapsed());
         dns.poll(&mut gateway, start.elapsed());
         for timer in &mut timers {
@@ -470,8 +481,10 @@ fn serve(
                     .map(|(_, due)| due.saturating_duration_since(now))
             })
             .fold(Duration::from_millis(2), Duration::min);
+        let mut readable = vec![socket.as_fd(), signals.as_fd()];
+        egress.append_fds(&mut readable);
         gateway
-            .wait_for_activity(&[socket.as_fd(), signals.as_fd()], wait)
+            .wait_for_activity(&readable, wait)
             .map_err(|_| "cannot wait for node activity")?;
     }
 }
@@ -532,7 +545,9 @@ fn receive(
 fn send(socket: &wgfeel_wireguard::UdpListener, datagram: EncryptedDatagram) {
     // UDP and worker backpressure are loss, never a plaintext/retry queue or a
     // reason to tear down healthy contexts. Protocol timers handle recovery.
-    let _ = socket.send_to(datagram.packet.as_bytes(), datagram.destination);
+    if !matches!(datagram.context, ContextId::External(_)) {
+        let _ = socket.send_to(datagram.packet.as_bytes(), datagram.destination);
+    }
 }
 
 struct Timer {

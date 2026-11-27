@@ -9,8 +9,8 @@
 
 use std::{fmt, net::SocketAddr};
 use wgfeel_core::{
-    DeviceId, DevicePublicKey, GatewayPrivateKey, NetworkId, NodeId, ServicePrivateKey,
-    TenantPrivateKey,
+    DeviceId, DevicePublicKey, EgressId, EgressPrivateKey, GatewayPrivateKey, NetworkId, NodeId,
+    PresharedKey, ServicePrivateKey, TenantPrivateKey,
 };
 
 pub mod dispatch;
@@ -18,6 +18,7 @@ mod forwarding;
 mod framing;
 mod gateway;
 pub mod mesh;
+pub mod nat;
 mod router;
 mod transport;
 mod udp;
@@ -40,17 +41,22 @@ pub const MAX_DEVICE_PEERS: usize = 750;
 pub const MAX_SERVICE_PEERS: usize = wgfeel_core::MAX_GATEWAYS + wgfeel_core::MAX_INVITATIONS;
 pub const MAX_MESH_PEERS: usize = MAX_TENANTS * wgfeel_core::MAX_GATEWAYS;
 pub const MAX_PLAINTEXT_SIZE: usize = 1280;
+/// Maximum padded WireGuard data message fitting a non-jumbo UDP payload.
+pub const MAX_PROVIDER_DATAGRAM_SIZE: usize = 65_504;
+pub(crate) const MAX_PROVIDER_PLAINTEXT: usize = MAX_PROVIDER_DATAGRAM_SIZE - 32;
 pub const MAX_DATAGRAM_SIZE: usize = MAX_PLAINTEXT_SIZE + 32;
 pub const MAX_HANDSHAKE_SOURCES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextId {
+    External(EgressId),
     Tenant(NetworkId),
     Service,
     Gateway,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerId {
+    Provider,
     Device(DeviceId),
     /// A Gateway authenticated with this tenant's key, never a service key.
     Gateway(NodeId),
@@ -64,6 +70,11 @@ pub struct PeerConfig {
 
 #[derive(Debug)]
 enum PrivateKey {
+    External {
+        key: EgressPrivateKey,
+        psk: Option<PresharedKey>,
+        keepalive: Option<std::num::NonZeroU16>,
+    },
     Tenant(TenantPrivateKey),
     Service(ServicePrivateKey),
     Gateway(GatewayPrivateKey),
@@ -71,6 +82,7 @@ enum PrivateKey {
 impl PrivateKey {
     fn expose_bytes(&self) -> &[u8; 32] {
         match self {
+            Self::External { key, .. } => key.expose_bytes(),
             Self::Tenant(k) => k.expose_bytes(),
             Self::Service(k) => k.expose_bytes(),
             Self::Gateway(k) => k.expose_bytes(),
@@ -84,6 +96,26 @@ pub struct ContextConfig {
     peers: Vec<PeerConfig>,
 }
 impl ContextConfig {
+    pub(crate) fn external(
+        id: EgressId,
+        key: EgressPrivateKey,
+        psk: Option<PresharedKey>,
+        keepalive: Option<std::num::NonZeroU16>,
+        public_key: DevicePublicKey,
+    ) -> Self {
+        Self {
+            id: ContextId::External(id),
+            private_key: PrivateKey::External {
+                key,
+                psk,
+                keepalive,
+            },
+            peers: vec![PeerConfig {
+                id: PeerId::Provider,
+                public_key,
+            }],
+        }
+    }
     pub fn tenant(id: NetworkId, key: TenantPrivateKey, peers: Vec<PeerConfig>) -> Self {
         Self {
             id: ContextId::Tenant(id),

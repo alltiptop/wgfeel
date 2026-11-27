@@ -38,6 +38,7 @@ pub(super) fn run(context: &ContextId, memory: u64) -> ExitCode {
 fn serve(context: &ContextId) -> Result<(), ProtocolError> {
     // std::io::Stdin's internal BufReader can retain bootstrap private bytes
     // outside our Zeroizing frame. Direct safe fd I/O makes no such copy.
+    let external = matches!(context, ContextId::External(_));
     let mut reader = PipeReader;
     let mut writer = PipeWriter;
     write_frame(&mut writer, &protocol::encode_ready())?;
@@ -50,18 +51,21 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
         Gateway::new(vec![config], limits).map_err(|_| ProtocolError::InvalidFrame)?;
     write_frame(
         &mut writer,
-        &protocol::encode_reply(&Reply {
-            sequence: 0,
-            indices: vec![],
-            authenticated_peer: None,
-            outcome: Ok(None),
-        })?,
+        &protocol::encode_reply_scoped(
+            external,
+            &Reply {
+                sequence: 0,
+                indices: vec![],
+                authenticated_peer: None,
+                outcome: Ok(None),
+            },
+        )?,
     )?;
     let mut expected_sequence = 1;
     loop {
         let request = {
             let frame = protocol::read_frame(&mut reader)?;
-            protocol::decode_request(&frame)?
+            protocol::decode_request_scoped(external, &frame)?
         };
         if request.sequence != expected_sequence {
             return Err(ProtocolError::InvalidFrame);
@@ -70,7 +74,7 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
         let outcome = match request.operation {
             Operation::Receive { peer, packet } => {
                 let selected = peer.map(|peer| peer_id(&peers, peer)).transpose()?;
-                match framing::datagram(&packet) {
+                match framing::datagram_for(&packet, external) {
                     Err(error) => Err(error),
                     Ok(_) => match Packet::copy_from(packet.as_slice()).try_into_wg() {
                         Err(_) => Err(WireGuardError::InvalidPacket),
@@ -128,12 +132,15 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
         };
         write_frame(
             &mut writer,
-            &protocol::encode_reply(&Reply {
-                sequence: request.sequence,
-                indices,
-                authenticated_peer,
-                outcome,
-            })?,
+            &protocol::encode_reply_scoped(
+                external,
+                &Reply {
+                    sequence: request.sequence,
+                    indices,
+                    authenticated_peer,
+                    outcome,
+                },
+            )?,
         )?;
         // The next request implicitly acknowledges acceptance of the previous
         // complete snapshot. No autonomous timers, reads or retries run here.
