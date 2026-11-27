@@ -8,14 +8,14 @@ COMMAND [OPTIONS]
 .SH DESCRIPTION
 \&One executable supports main and child control capabilities. Main owns configuration and can also serve or relay user traffic. Children keep forwarding accepted traffic when main is unavailable. External HTTP REST uses its own TCP listener. Use \-\-help or COMMAND \-\-help for details.
 .SH CONNECTION
-\&Administrative commands discover the installed Management socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, choose either \-\-profile or the pair \-\-socket and \-\-credential\-file. Connection options may appear anywhere after user, device, node, config or token. Existing file ownership and permission checks still apply.
+\&Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either \-\-profile or both \-\-socket and \-\-credential\-file. Connection options may appear anywhere after user, device, node or config. File ownership and permission checks still apply.
 .TP
 .B \&\-\-profile PATH
-\&Use an existing private administrator profile for remote access over WireGuard. Cannot be combined with \-\-socket or \-\-credential\-file.
+\&Use a private administrator profile for remote access over WireGuard. Cannot be combined with \-\-socket or \-\-credential\-file.
 
 .TP
 .B \&\-\-socket PATH
-\&Use a local Management API socket; requires \-\-credential\-file.
+\&Use a local main Unix socket; requires \-\-credential\-file.
 
 .TP
 .B \&\-\-credential\-file PATH
@@ -27,7 +27,7 @@ COMMAND [OPTIONS]
 \&wgfeel install [\-\-control main|child] [OPTIONS]
 .fi
 .PP
-\&Install one wgfeel executable, one wgfeel.service, manuals, completions and protected state under instance/. Main can also carry user traffic. Run without arguments for the interactive menus. On main, choose the traffic mode and both ports. A child stays stopped until join. Existing state is preserved; use update for an existing installation.
+\&Install the wgfeel executable, wgfeel.service, manual page, shell completions and protected state under instance/. Run without arguments for interactive menus. On main, choose the traffic mode, HTTP API port and WireGuard UDP port. A child stays stopped until wgfeel join. Existing state is preserved; use wgfeel update to upgrade.
 .TP
 .B \&\-\-control main|child
 \&Control capability; required for noninteractive installation.
@@ -227,7 +227,7 @@ Examples:
 \&wgfeel serve \-\-control main|child \-\-state\-dir PATH [OPTIONS]
 .fi
 .PP
-\&Run the selected control capability in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use \-\-listen\-ip and recover the assigned port from their committed binding. For a foreground child with an explicit bind address, use \-\-listen. The executable name does not select authority.
+\&Run main or child in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use \-\-listen\-ip and read the assigned port from their saved configuration. For a manually started child, pass \-\-listen.
 .TP
 .B \&\-\-control main|child
 \&Required control capability; it must match the initialized state.
@@ -314,7 +314,7 @@ Examples:
 \&wgfeel user add [NAME]
 .fi
 .PP
-\&Create a user and its isolated network. Ask for the user name when omitted, then ask for the first device name. IDs, addresses and keys are generated. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
+\&Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
 .TP
 .B \&NAME
 \&Friendly user name; quote names containing spaces.
@@ -387,7 +387,7 @@ Examples:
 \&wgfeel node list
 .fi
 .PP
-\&List Nodes registered with Management and their public enrollment information.
+\&List nodes registered on main and their public enrollment information.
 .PP
 Examples:
 .nf
@@ -398,16 +398,16 @@ Examples:
 \&wgfeel node show ID
 .fi
 .PP
-\&Show public details of the selected registered Node.
+\&Show public details of the selected registered node.
 .TP
 .B \&ID
-\&Required registered Node ID.
+\&Required registered node ID.
 .SS node add
 .nf
 \&wgfeel node add [OPTIONS]
 .fi
 .PP
-\&Create a one\-time invitation and print the main endpoints, child UDP port and wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re\-enrolling an existing child requires its current mode. Treat the invitation as a credential.
+\&Create a one\-time invitation and print main's endpoints, the child UDP port and the wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re\-enrolling an existing child requires its current mode. Treat the invitation as a credential.
 .TP
 .B \&\-\-traffic entry|relay|off
 \&Child traffic capability. Default: entry. Relay carries ciphertext without tenant keys; off carries control traffic only.
@@ -425,10 +425,10 @@ Examples:
 \&wgfeel node delete ID [\-\-revision NUMBER]
 .fi
 .PP
-\&Display the Node and ask for confirmation before removing it from the desired configuration. Confirmation defaults to no.
+\&Display the node and ask for confirmation before removing it from the configuration. Confirmation defaults to no.
 .TP
 .B \&ID
-\&Required registered Node ID.
+\&Required registered node ID.
 .TP
 .B \&\-\-revision NUMBER
 \&Expected positive configuration revision; otherwise use the current revision.
@@ -437,7 +437,7 @@ Examples:
 \&wgfeel config show
 .fi
 .PP
-\&Display the public desired Management configuration.
+\&Display the public desired configuration on main.
 .PP
 Examples:
 .nf
@@ -448,7 +448,7 @@ Examples:
 \&wgfeel config identity
 .fi
 .PP
-\&Display the public Management identity and enrollment information.
+\&Display main's public service identity and enrollment information.
 .PP
 Examples:
 .nf
@@ -459,7 +459,7 @@ Examples:
 \&wgfeel config distribution
 .fi
 .PP
-\&Display configuration delivery status for Nodes.
+\&Display configuration delivery status for registered nodes.
 .PP
 Examples:
 .nf
@@ -470,7 +470,7 @@ Examples:
 \&wgfeel token rotate [\-\-revision NUMBER]
 .fi
 .PP
-\&Revoke the old administrator token and print the new token once. Available only through installed local administration, without \-\-profile, \-\-socket or \-\-credential\-file. Preserve the new token securely.
+\&Revoke the old administrator token and print the new token once. In the CLI this uses installed local administration only, without \-\-profile, \-\-socket or \-\-credential\-file (HTTP integrations can rotate tokens via POST /api/v1/token/rotate). Store the new token securely.
 .TP
 .B \&\-\-revision NUMBER
 \&Expected positive configuration revision; otherwise use the current revision.

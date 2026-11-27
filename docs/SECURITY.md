@@ -2,83 +2,97 @@
 
 ## Scope and required properties
 
-wgfeel manages isolated user networks through Management, mesh Nodes and standard
-WireGuard clients. This policy covers the server and CLI code, installation and
-updates, configuration storage, administrative interfaces, DNS and dependencies.
+`wgfeel` manages isolated user networks across a `main` server, `child` mesh
+nodes and standard WireGuard clients. This policy covers server and CLI code,
+installation and updates, configuration storage, administrative interfaces,
+split DNS and dependencies.
 
 Security-sensitive changes must preserve these properties:
 
-- Traffic is bound to an authenticated user/network and device identity. Source
-  validation and ACLs prevent access across users, including overlapping IP ranges.
-- Main is the configuration authority. Remote CLI administration requires
-  administrative WireGuard access and a bearer token. External HTTP REST
-  integrations use a separate TCP listener and require a bearer token, including
-  on loopback. Use a TLS reverse proxy for remote HTTP access; the default bind
-  is loopback. Local administration uses an owner-only, OS-authenticated Unix socket.
-- Main generates 32 random bytes for each administrative bearer token at
-  initialization and rotation. Its current private snapshot stores an HMAC-SHA256
-  of a random salt keyed by that token. Each authenticated request verifies against
-  the current snapshot, including requests following a published rotation.
-- Node enrollment and configuration delivery use authenticated service WireGuard
-  on the shared UDP port, independently of HTTP REST. External HTTP cannot dispatch
-  these internal RPCs; issuing an invitation is an administrative operation, not
-  the node's enrollment exchange.
-- Each Node receives only its own private keys and the configuration it needs.
-  Tokens, invitations, private keys and complete sensitive payloads stay out of logs.
-- Service, gateway and per-user client contexts use independent WireGuard keys.
-  Gateway membership never grants configuration authority. Relays filter public
-  routing metadata; entries authenticate the inner tenant ciphertext and recheck
-  device ownership, source addresses and ACLs before delivering plaintext.
-- Configuration acceptance requires validation, durable storage and activation.
-  Storage failures and uncertain writes must preserve fail-closed behavior.
-- Untrusted packets and requests have bounded parsing, queues and resource use.
-  Tenant workers remain confined from other tenants and host infrastructure.
+- **Per-user isolation**: traffic is bound to an authenticated user/network and
+  device identity. Source validation and ACLs block cross-user traffic, even
+  when user networks use overlapping IP ranges.
+- **Strict administrative boundaries**: `main` is the sole configuration
+  authority.
+  - Local administration uses an owner-only, OS-authenticated Unix socket
+    (`state/api.sock`).
+  - Remote CLI administration requires WireGuard authentication plus a bearer
+    token.
+  - External HTTP REST integrations use a separate TCP listener (loopback by
+    default) and always require a bearer token, including on loopback. Use a
+    TLS reverse proxy for remote HTTP access.
+- **Hashed bearer tokens**: `main` generates 32 random bytes for each
+  administrator bearer token on initialization and rotation, storing only an
+  HMAC-SHA256 verifier with a random salt in its private state. Every
+  authenticated request is verified against the current snapshot.
+- **Isolated node control**: child enrollment and configuration delivery run
+  over authenticated service WireGuard on the shared UDP port, independently of
+  HTTP REST. External HTTP cannot dispatch internal node RPCs (issuing an
+  invitation only creates a temporary credential; enrollment itself always uses
+  WireGuard).
+- **Least privilege and clean logs**: each node receives only its own private
+  keys and assigned configuration. Tokens, invitations, private keys and raw
+  sensitive payloads must stay out of logs.
+- **Key separation and relay defense**: service, gateway and per-user client
+  contexts use independent WireGuard key pairs. Gateway membership never grants
+  configuration authority. Relays filter on public routing metadata; `entry`
+  nodes authenticate the inner tenant ciphertext and recheck device ownership,
+  source addresses and ACLs before delivering plaintext.
+- **Fail-closed durability**: configuration acceptance requires validation,
+  durable storage and activation. Storage failures or uncertain writes must
+  fail closed.
+- **Bounded work and confinement**: untrusted packets and HTTP requests have
+  bounded parsing, queues and resource limits. Tenant workers run confined from
+  other tenants and host infrastructure.
 
-Report suspected isolation or authentication bypasses, secret exposure,
+Report suspected isolation or authentication bypasses, secret leaks,
 unauthorized configuration changes, confinement escapes, unsafe filesystem
-operations and denial of service. Include the attacker's required access and the
-affected boundary. For dependency reports, include the package version and
-advisory ID, with reachable code paths and impact if known.
+operations or denial-of-service bugs. Include the attacker's required access
+and affected boundary (for dependency advisories, include package version,
+advisory ID and reachable code paths if known).
 
 ## Trust boundaries and limitations
 
-Management, the host kernel and shared Node control/dispatch processes are trusted.
-An enrolled Node's control process participates in mesh routing; compromising it
-can disrupt routing availability. Attacks reaching these components through
-untrusted inputs remain security-relevant.
-
-Nodes terminating device tunnels can see decrypted IP traffic. WireGuard protects
-individual tunnel hops; use application-layer encryption for end-to-end secrecy.
-
-Management stores device and per-Node key material. Node storage contains its
-own keys and accepted configuration. Private directories/files use
-`0700`/`0600`; secrets are not encrypted at rest. Protect backups, exported client
-profiles and remote administrative profiles accordingly. Join invitations are
-temporary credentials and may appear in shell history.
-
-Disconnected Nodes retain their last accepted policy. New revocations and policy
-changes take effect when delivered and applied; inspect
-`wgfeel config distribution` for acknowledgement status.
-
-The supported server target is Linux x86-64. Real multi-host deployment remains
-unverified. The [backlog](BACKLOG.md) tracks reproducible load testing.
-No long-term support/backport policy or security response SLA is currently defined.
+- `main`, the host kernel and each node's shared control/dispatch process are
+  trusted. Compromising an enrolled node's control process can disrupt mesh
+  routing availability; attacks reaching these components via untrusted input
+  remain security-relevant.
+- `entry` nodes terminate device tunnels and can see decrypted IP traffic.
+  WireGuard protects each tunnel hop; use application-layer encryption (such as
+  TLS or SSH) for end-to-end secrecy.
+- Each server generates and keeps its own permanent service and gateway private
+  keys. Recovering a child's identity requires that child's backup. `main`
+  also stores the device private keys it generates and the private key for
+  each user network on each serving `entry`.
+- Secrets are stored unencrypted on disk. Private directories use mode `0700`
+  and secret files use `0600`. Protect backups, exported client configs and
+  remote admin profiles. Use `--invitation-stdin` to keep join invitations
+  out of command arguments and shell history.
+- A disconnected child keeps enforcing its last applied policy. A revocation
+  takes effect on that child as soon as it applies the new revision.
+  `wgfeel config distribution` shows `pending` until `main` receives confirmation,
+  even if the child is already enforcing the change.
+- Only Linux x86-64 servers are supported. Real multi-host deployment and
+  production load testing are not yet verified (see the [backlog](BACKLOG.md)).
+  No long-term support, backport policy or response SLA is currently defined.
 
 ## Reporting a vulnerability
 
-Send your report to the wgfeel maintainers through the
-[private vulnerability report form](https://github.com/alltiptop/wgfeel/security/advisories/new).
+Report vulnerabilities privately using the
+[GitHub private vulnerability report form](https://github.com/alltiptop/wgfeel/security/advisories/new).
 If the form is unavailable, open a [GitHub issue](https://github.com/alltiptop/wgfeel/issues/new)
-asking for a private contact. Share technical details only through the private channel.
+requesting a private contact—do not post technical exploit details publicly.
 
-Include:
+Please include:
 
-- The affected version or source revision, platform and deployment roles.
-- Required access, minimal reproduction steps and expected versus actual behavior.
-- The security impact and affected users, keys or services.
+- Affected version or commit, platform and node roles (`main`/`child`,
+  `entry`/`relay`/`off`).
+- Required access, minimal reproduction steps, and expected vs. actual behavior.
+- Security impact and affected users, keys or services.
 - Sanitized logs or a small reproducer using disposable identities and test data.
 
-Keep credentials, live invitations, private keys and deployment data out of public
-reports. Coordinate disclosure with the maintainer after a fix and its verification.
+Keep credentials, live invitations, private keys and real deployment data out
+of public reports. Coordinate disclosure with the maintainer after a fix is
+verified.
 
-[README](../README.md) · [Contributing](CONTRIBUTING.md)
+[README](../README.md) · [Getting started](GETTING_STARTED.md) · [Contributing](CONTRIBUTING.md)

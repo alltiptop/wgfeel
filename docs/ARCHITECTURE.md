@@ -1,13 +1,13 @@
-# Unified node model
+# Architecture
 
-All installations use one `wgfeel` executable and one service. Control authority
-and user-traffic participation are independent capabilities.
+Every server runs the same `wgfeel` executable and one `wgfeel.service`.
+Control authority and user-traffic participation are independent capabilities.
 
-## Independent capabilities
+## Node capabilities
 
-Every host runs the same `wgfeel` binary and one service. One configured `main`
-owns authoritative configuration. All other participants are `child` nodes.
-Control authority is independent of the user-traffic mode:
+One `main` server owns authoritative configuration; all other servers are
+`child` nodes. Each host independently participates in user traffic in one of
+three modes:
 
 | Traffic mode | Accept device peers | Relay user ciphertext | Carry control traffic |
 | --- | --- | --- | --- |
@@ -15,46 +15,55 @@ Control authority is independent of the user-traffic mode:
 | `relay` | No | Yes | Yes |
 | `off` | No | No | Yes |
 
-All six combinations are supported. Relays receive public
-routing policy for their assigned networks, but no tenant private keys. Off nodes
-receive neither user-network scope nor tenant keys. A main can serve devices
-without installing a second binary or running a second public UDP listener.
+All six `main`/`child` × `entry`/`relay`/`off` combinations are supported.
+Relays receive public routing policy for their assigned networks, never tenant
+private keys. `off` nodes receive neither user-network scope nor tenant keys.
+An `entry` `main` can serve devices directly with no separate child host.
 
-## Two distinct APIs
+## Two separate APIs
 
-- The external REST API runs on a separate **HTTP/TCP** listener on main. It is
-  intended for web-panel backends and other integrations. Installation asks for
-  its port; an explicit local command can change that port after installation.
-  Network requests always require an administrator token, including loopback
-  requests. This listener cannot dispatch internal enrollment/configuration RPCs.
-- Node enrollment, configuration delivery, acknowledgements and mesh control use
-  the internal **WireGuard/UDP** transport. They are authenticated with node or
-  invitation identities. Mesh membership grants no REST administration rights.
+- **External HTTP/TCP REST API** on `main` (for web panels and external
+  integrations). Installation enables it on `127.0.0.1:9280` by default;
+  `wgfeel api port PORT` changes its port locally without affecting WireGuard,
+  keys or device profiles. Every request requires a bearer token, including on
+  loopback. This listener never dispatches internal node enrollment or
+  configuration RPCs. Put it behind a TLS reverse proxy for remote access.
+- **Internal WireGuard/UDP transport** (for child enrollment, configuration
+  delivery, acknowledgements, mesh routing and remote CLI `--profile` access).
+  Authenticated with node, invitation or administrator WireGuard identities.
+  Mesh membership never grants REST administration rights.
 
-The single-port requirement concerns WireGuard: service, gateway and tenant contexts share
-one UDP listener per host. The external HTTP listener is independent, and changing
-its port must not change the mesh port, keys or device configurations. HTTP binds
-to loopback by default; deployment behind a TLS reverse proxy supports remote
-integrations without adding a TLS implementation to wgfeel.
+```text
+Panel backend -- HTTP + bearer token --> main
+                                           |
+                               internal WireGuard mesh
+                                           |
+                                       children
 
-## Three cryptographic boundaries, one UDP listener
+Phone <-> entry A <-> relay B <-> entry C <-> Laptop
+```
+
+## Three cryptographic boundaries on one UDP port
+
+Service, gateway and tenant contexts share a single WireGuard UDP listener per
+host, while keeping separate keys and confined worker processes:
 
 | Context | Independent keys | Accepted work |
 | --- | --- | --- |
-| Service | One permanent service key pair per instance; separate temporary invitation and administrator identities | Enrollment, configuration and authenticated administration |
-| Gateway | One permanent gateway key pair per instance | Mesh health, routing and relay envelopes carrying encrypted tenant packets |
-| Clients | One tenant key pair per user network on each serving entry; each device has its own key | Device traffic and encrypted tenant transport between entries |
+| Service | One permanent service key pair per server; separate temporary invitation and administrator identities | Enrollment, configuration delivery and authenticated administration |
+| Gateway | One permanent gateway key pair per server | Mesh health probes, topology announcements and relay envelopes carrying encrypted tenant packets |
+| Clients | One tenant key pair per user network on each serving `entry`; each device has its own key | Device WireGuard traffic and encrypted tenant transport between entries |
 
-Service and gateway identities are generated independently and persisted together.
-Assignments and enrollment include both public keys. Key reuse across roles is
-rejected. A child accepts configuration only from its pinned main service identity;
-being a gateway peer grants no configuration or administrator authority.
+Service and gateway key pairs are generated independently and persisted
+together; key reuse across roles is rejected. A child accepts configuration
+only from its pinned `main` service key—being a gateway peer grants no control
+or administrator authority.
 
-One application service owns the UDP socket. Each cryptographic context runs in a
-confined worker process receiving only its own private key. The dispatcher uses
-WireGuard authentication and receiver indices to select a context. Packet type
-tags cannot switch its authority. No Linux WireGuard interface, TUN device or host
-forwarding rule is installed.
+Each cryptographic context runs in a confined worker process that receives only
+its own private key. The dispatcher routes incoming datagrams using WireGuard
+authentication and receiver indices; packet type tags cannot cross context
+boundaries. No Linux WireGuard interface, TUN device or host forwarding rule is
+configured.
 
 ```text
 service: main ========================================> child
@@ -64,136 +73,121 @@ clients: phone <==> entry A <------ tenant WG -------> entry C <==> laptop
 clients: phone <==> entry A <==> laptop
 ```
 
-Entries terminate native device tunnels and can inspect their users' plaintext.
-Between entries, a tenant packet stays encrypted through intermediate relays.
-Relays receive only public routing/ACL metadata for their assigned networks and
-their own gateway keys. This does not provide device-to-device end-to-end secrecy.
+`entry` nodes terminate device tunnels and can inspect their users' plaintext.
+Between entries, tenant packets stay encrypted across intermediate relays;
+relays see only public routing/ACL metadata for their assigned networks. This
+protects transit across relays, not device-to-device end-to-end secrecy.
 
-Local forwarding, mesh ingress, relay filtering and mesh exit call the same
-`GatewayProjection::forwarding_decision` contract for ACLs and device placement.
-Ingress binds the source IP to its authenticated device. Exit authenticates the
-inner tenant peer, derives endpoints from the decrypted packet and checks that
-they match the relay envelope. Relay metadata alone never authorizes delivery.
-Explicit cross-network grants remain local to one entry; cross-network mesh
-forwarding is rejected. Same-user mesh traffic follows the same policy at each
-hop, including suspension and explicit denies.
+## Policy, routing and failover
 
-For user traffic, each node prefers a live direct link to the destination entry.
-If that link fails, it searches the advertised topology for a shortest path
-through nodes assigned to the user's network. During a partition, nodes keep
-probing their peers. Forwarding resumes when they discover a permitted path
-between the entries, even while main is offline.
+- **Uniform policy enforcement**: local forwarding, mesh ingress, relay
+  filtering and mesh exit all evaluate the same device-placement and ACL rules.
+  Ingress binds each source IP to its authenticated device. Exit authenticates
+  the inner tenant peer, derives endpoints from the decrypted packet and
+  verifies they match the relay envelope—relay metadata alone never authorizes
+  delivery. Cross-network mesh forwarding is rejected (explicit cross-network
+  grants remain local to one entry), and user suspension or explicit denies
+  apply at every hop.
+- **Path selection and recovery**: each node prefers a live direct link to the
+  destination `entry`. If that link fails, it selects a shortest path through
+  nodes assigned to the user's network. During a partition, nodes keep probing
+  peers and resume forwarding as soon as a permitted path returns, even while
+  `main` is offline.
+- **Loop limits and restarts**: relays decrement the hop limit on every
+  forwarded frame and topology announcement (starting at the number of nodes in
+  the mesh). Nodes accept increasing announcement sequence numbers from the
+  same boot; after an origin restarts, its new boot ID takes over once the
+  6-second topology lease expires.
 
-A relay decreases the hop limit of every forwarded data frame and topology
-announcement. The initial limit is the number of nodes in the mesh. A node
-accepts increasing announcement sequences from the same boot. When an origin
-restarts, its new boot ID can take over after the six-second topology lease expires.
+## Configuration delivery and reloads
 
-## Configuration and failure behavior
+- **Authoritative revisions**: `main` durably commits each configuration
+  revision. Every node receives only its own scope and secrets, persists them
+  durably and reports its applied revision. Children keep forwarding their last
+  accepted configuration during a `main` outage and catch up once connectivity
+  returns. Children do not forward configuration to other children, and there
+  are no automatic `main` elections or queued administrative writes.
+- **Node withdrawals**: when `main` removes a child, it delivers an
+  authenticated withdrawal from its bound UDP port and retains the child's ID
+  and public keys until the child acknowledges it (so a permanently offline
+  child remains pending). Up to 150 withdrawals can be pending at once.
+- **Independent service delivery**: active configuration delivery opens
+  main-to-child service sessions over the shared UDP socket independently of
+  gateway health or traffic mode, retrying configured endpoints if replies
+  stop. Service and gateway contexts drive their own WireGuard handshake and
+  rekey timers; rekeying does not reset an active configuration TCP stream.
+  Stalled delivery requests release their slot after 5 seconds without
+  progress, while progressing transfers keep a separate overall deadline.
+- **Revision activation and worker isolation**: policy changes replace mesh
+  policy, pending relay work, fragment assemblies and DNS state together.
+  Unchanged cryptographic sessions may survive, but old authorization decisions
+  never do. `main` keeps a healthy service worker across prepared updates; a
+  worker failure alone does not trigger an automatic restart or stop healthy
+  tenant workers, and a failed worker can be replaced on the next committed
+  revision.
 
-Main durably publishes each configuration revision. Each participant receives
-only its own configuration and secret material, applies it durably, and reports
-the applied revision. Forwarding retains the last accepted configuration during a
-main outage. A disconnected node catches up when a path becomes available.
+## Endpoint selection and installation layout
 
-When main removes a child, it delivers the withdrawal from the same bound UDP
-port. Main retains the child's ID and public keys until it receives the child's
-authenticated acknowledgement. A permanently offline child therefore remains
-pending. Up to 150 withdrawals can be pending at once.
+Interactive address selection lists local interface addresses—including private
+hosting networks and tunnels—while omitting loopback interfaces. The operator
+picks reachable addresses in preference order or enters them manually.
+Automatic endpoint advertisement enforces the protocol's validation rules,
+including rejecting host-specific IPv6 scopes. Traffic mode does not require a
+public IP on the host.
 
-Active configuration delivery establishes its own main-to-child service sessions
-on the common UDP socket, independently of gateway health or traffic mode. It
-retries configured addresses when service replies stop. Service and gateway
-contexts each drive their own WireGuard handshake and rekey timers. Rekeying does
-not reset an active configuration TCP stream. Abandoned distribution requests
-release their slot after five seconds without progress; progressing requests
-retain the separate overall request deadline.
+Standard installations use `/opt/wgfeel/instance`, one `wgfeel.service` unit
+and one `wgfeel` command alias:
 
-Children do not forward configuration to other children. User traffic remains separated by tenant
-context and policy. There are no automatic main elections or queued
-administrative writes in the MVP.
-
-The active revision is the application baseline. Policy changes replace mesh
-policy, pending relay work, fragment assemblies and DNS decisions together.
-Unchanged cryptographic sessions may survive, but old permission decisions do
-not. Main retains a healthy service worker during prepared configuration changes;
-a failed worker can be replaced by a newly committed revision. A worker failure
-alone does not cause an automatic restart or stop healthy tenant workers.
-
-```text
-Panel backend -- HTTP + token --> main
-                                  |
-                    internal WireGuard mesh
-                                  |
-                               children
-
-Phone <-> entry A <-> relay B <-> entry C <-> Laptop
-```
-
-Address selection lists local interface addresses, including private hosting
-networks and tunnels. Loopback interfaces are omitted. The operator selects reachable addresses
-in preference order or enters them manually. Automatic advertisement retains the protocol's endpoint validation,
-including its restriction on host-specific IPv6 scopes. Traffic mode does not
-determine whether the host physically has a public address.
-
-## Installation and command interface
-
-The layout is `/opt/wgfeel/instance`, with one `wgfeel.service` and command alias.
-`wgfeel install --control main|child` selects control authority. Main defaults to
-`--traffic entry`; it also supports `relay` and `off`. Main selects child traffic
-policy with `wgfeel node add --traffic entry|relay|off`, which prints the advertised main endpoints, the assigned child UDP port and
-a one-time `wgfeel join` command. An installed unbound child has no running
-service. The join process receives the configuration over WireGuard and activates
-the installed service after the binding has been committed. An enrolled child's
-traffic mode is fixed.
-
-`wgfeel init` and `wgfeel serve` use the same explicit `--control main|child`
-selection. Update, uninstall, manuals and completion operate on that one instance.
-
-Remote CLI profiles use WireGuard authentication and an administrative bearer
-token on main's shared UDP listener. Enrollment verification and withdrawal of
-retired children also use authenticated WireGuard exchanges. The external HTTP
-listener requires a bearer token and rejects internal node RPCs and local
-owner-only operations.
+- `wgfeel install --control main` defaults to `--traffic entry` (also supports
+  `relay` and `off`).
+- `wgfeel install --control child` prepares keys and the unit file while
+  leaving the service stopped. `main` fixes the child's traffic mode via
+  `wgfeel node add --traffic entry|relay|off`; `wgfeel join` receives the
+  configuration over WireGuard and starts the service unless installed with
+  `--no-start`. An enrolled child's traffic mode is fixed.
+- Low-level `wgfeel init` and `wgfeel serve` take the same explicit
+  `--control main|child` flag. `update`, `uninstall`, manual page and shell
+  completions all operate on that single instance.
 
 ## Verification scope
 
-Local tests exercise temporary installation/update/removal trees, foreground
-main/child processes in all six capability combinations, native-format client
-traffic, isolation, authority transfer and failure recovery, and live/offline
-HTTP port changes. Generated documentation, completion, formatting, Clippy and
-the common release build are checked separately; see [Contributing](CONTRIBUTING.md).
-These checks do not establish real-host systemd, reboot or load acceptance.
-The [backlog](BACKLOG.md) tracks the planned Docker Compose integration and load tests.
+Automated tests cover temporary install/update/uninstall trees, foreground
+`main`/`child` processes across all six capability combinations, native-format
+client traffic, tenant isolation, authority transfer, failure recovery, and live
+or offline HTTP port changes. Generated docs, completions, formatting, Clippy
+and the release build are verified separately (see [Contributing](CONTRIBUTING.md)).
 
-## Lessons from other implementations
+These tests do not establish real-host systemd, reboot or production load
+acceptance. Planned Docker Compose integration and load tests are tracked in
+the [backlog](BACKLOG.md).
 
-These references inform the boundaries and regression scenarios; their code is
-not incorporated into wgfeel:
+## Design references
 
-- [WireGuard cryptokey routing](https://www.wireguard.com/#cryptokey-routing)
-  binds inner source addresses to authenticated peer keys. Tailscale's
-  [shared-node quarantine bulletin](https://tailscale.com/security-bulletins)
-  also demonstrates why source-IP-only filtering is insufficient. wgfeel checks
-  context, authenticated peer, device ownership and source address together.
-- [Nebula's firewall](https://github.com/slackhq/nebula/blob/master/firewall.go)
-  versions connection tracking against rule changes. Its
-  [configuration reload report](https://github.com/slackhq/nebula/issues/1951)
-  describes comparing against a previous desired configuration after partial
-  failure. wgfeel distinguishes committed, active and acknowledged revisions;
-  regressions cover suspend/resume and replacement after worker failure.
-- [NetBird relay transport](https://docs.netbird.io/help/troubleshooting-relayed-connections)
-  keeps relayed payloads encrypted. wgfeel applies that property between entries
-  while retaining native device clients. The
-  [unavailable-relay report](https://github.com/netbirdio/netbird/issues/4498)
-  motivates authenticated path probes and alternate-path tests.
-- The [NetBird PMTU report](https://github.com/netbirdio/netbird/discussions/6923)
-  describes large requests stalling while smaller ones work. wgfeel tests full
-  1280-byte inner packets, relay fragmentation and IPv4/IPv6 path changes.
-  This is not proof that arbitrary underlying path MTUs work: real-host MTU and
-  file-transfer acceptance remains outstanding.
+These public references informed `wgfeel`'s security boundaries and regression
+tests (no code from these projects is incorporated; issue links reflect their
+authors' reports, not audits of current releases):
 
-The issue/discussion links are reports by their authors, not independent audits
-of those projects or claims about every current release.
+- **Cryptokey routing and source binding** —
+  [WireGuard cryptokey routing](https://www.wireguard.com/#cryptokey-routing)
+  and Tailscale's [security bulletins](https://tailscale.com/security-bulletins)
+  (shared-node quarantine) motivate checking context, authenticated peer,
+  device ownership and source address together rather than relying on source IP
+  alone.
+- **Versioned reloads** —
+  [Nebula's firewall](https://github.com/slackhq/nebula/blob/master/firewall.go)
+  and its [reload issue](https://github.com/slackhq/nebula/issues/1951) inform
+  distinguishing committed, active and acknowledged revisions, with tests for
+  suspend/resume and recovery after worker failure.
+- **Encrypted relaying and failover** —
+  [NetBird relay transport](https://docs.netbird.io/help/troubleshooting-relayed-connections)
+  and its [unavailable-relay report](https://github.com/netbirdio/netbird/issues/4498)
+  motivate keeping relayed payloads encrypted between entries and testing
+  authenticated path probes and alternate routes.
+- **Packet size and fragmentation** —
+  [NetBird PMTU discussion](https://github.com/netbirdio/netbird/discussions/6923)
+  motivates testing full 1280-byte inner packets, relay fragmentation and
+  IPv4/IPv6 path changes (real-host MTU and file-transfer acceptance remains
+  open).
 
-[README](../README.md) · [Backlog](BACKLOG.md) · [Contributing](CONTRIBUTING.md)
+[README](../README.md) · [Getting started](GETTING_STARTED.md) ·
+[HTTP REST API](REST_API.md) · [Backlog](BACKLOG.md) · [Contributing](CONTRIBUTING.md)

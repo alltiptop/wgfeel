@@ -2,9 +2,9 @@
 
 # Command reference
 
-[README](../README.md) · [Contributing](CONTRIBUTING.md)
+[README](../README.md) · [Getting started](GETTING_STARTED.md) · [Contributing](CONTRIBUTING.md)
 
-`wgfeel` runs one instance with independent main/child control and entry/relay/off traffic capabilities.
+`wgfeel` runs one instance with independent `main`/`child` control and `entry`/`relay`/`off` traffic capabilities.
 Installations use one executable and one service.
 
 `[VALUE]` is optional; uppercase values are placeholders. Quote names containing
@@ -13,48 +13,48 @@ with your own. Interactive selection uses numbers; explicit arguments use IDs.
 
 ## Contents
 
-- [Management connection](#management-connection)
+- [Connection options](#connection-options)
 - [wgfeel](#wgfeel)
 
-## Management connection
+## Connection options
 
-Administrative commands discover the installed Management socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, choose either --profile or the pair --socket and --credential-file. Connection options may appear anywhere after user, device, node, config or token. Existing file ownership and permission checks still apply.
+Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either --profile or both --socket and --credential-file. Connection options may appear anywhere after user, device, node or config. File ownership and permission checks still apply.
 
 | Option | Description |
 | --- | --- |
-| `--profile PATH` | Use an existing private administrator profile for remote access over WireGuard. Cannot be combined with --socket or --credential-file. |
-| `--socket PATH` | Use a local Management API socket; requires --credential-file. |
+| `--profile PATH` | Use a private administrator profile for remote access over WireGuard. Cannot be combined with --socket or --credential-file. |
+| `--socket PATH` | Use a local main Unix socket; requires --credential-file. |
 | `--credential-file PATH` | Read the administrator credential from an owned regular file with mode 0600; requires --socket. |
 
 ## wgfeel
 
 | Command | Purpose |
 | --- | --- |
-| [install](#wgfeel-install) | Install one wgfeel executable, one wgfeel.service, manuals, completions and protected state under instance/ |
+| [install](#wgfeel-install) | Install the wgfeel executable, wgfeel.service, manual page, shell completions and protected state under instance/ |
 | [update](#wgfeel-update) | Replace the installed executable and refresh its manual and shell completions from the newly copied binary |
 | [uninstall](#wgfeel-uninstall) | Remove the receipt-owned service, executable and command resources |
 | [api port](#wgfeel-api-port) | Show or change the external REST HTTP listener port on this main |
 | [state-check](#wgfeel-state-check) | Read committed local child forwarding state and print its public summary |
-| [--build-info](#wgfeel-build-info) | Print the executable name and package version without opening state or contacting a service. |
+| [--build-info](#wgfeel-build-info) | Print the executable name and package version without opening state or contacting a service |
 | [completions](#wgfeel-completions) | Print shell integration for Bash or Zsh |
 | [init](#wgfeel-init) | Initialize protected state for the selected control capability |
-| [serve](#wgfeel-serve) | Run the selected control capability in the foreground |
+| [serve](#wgfeel-serve) | Run main or child in the foreground |
 | [join](#wgfeel-join) | Enroll the local child using a one-time invitation over service WireGuard on the shared UDP port |
 | [user](#wgfeel-user) | Open the interactive administration menus |
 | [user list](#wgfeel-user-list) | List users with their IDs, names, device counts and suspension status, then allow interactive selection |
 | [user show](#wgfeel-user-show) | Open a user's details and device menu |
-| [user add](#wgfeel-user-add) | Create a user and its isolated network |
+| [user add](#wgfeel-user-add) | Create a user and its isolated network, ask for the first device name, then open the user's menu |
 | [user remove](#wgfeel-user-remove) | Display the selected user and ask for confirmation before deleting the user and its devices |
 | [device add](#wgfeel-device-add) | Create a device in the selected user's network, then open its details |
 | [device show](#wgfeel-device-show) | Open device details, including its WireGuard client configuration |
 | [device delete](#wgfeel-device-delete) | Display the device and ask for confirmation before deleting it |
-| [node list](#wgfeel-node-list) | List Nodes registered with Management and their public enrollment information. |
-| [node show](#wgfeel-node-show) | Show public details of the selected registered Node. |
-| [node add](#wgfeel-node-add) | Create a one-time invitation and print the main endpoints, child UDP port and wgfeel join command |
-| [node delete](#wgfeel-node-delete) | Display the Node and ask for confirmation before removing it from the desired configuration |
-| [config show](#wgfeel-config-show) | Display the public desired Management configuration. |
-| [config identity](#wgfeel-config-identity) | Display the public Management identity and enrollment information. |
-| [config distribution](#wgfeel-config-distribution) | Display configuration delivery status for Nodes. |
+| [node list](#wgfeel-node-list) | List nodes registered on main and their public enrollment information |
+| [node show](#wgfeel-node-show) | Show public details of the selected registered node |
+| [node add](#wgfeel-node-add) | Create a one-time invitation and print main's endpoints, the child UDP port and the wgfeel join command |
+| [node delete](#wgfeel-node-delete) | Display the node and ask for confirmation before removing it from the configuration |
+| [config show](#wgfeel-config-show) | Display the public desired configuration on main |
+| [config identity](#wgfeel-config-identity) | Display main's public service identity and enrollment information |
+| [config distribution](#wgfeel-config-distribution) | Display configuration delivery status for registered nodes |
 | [token rotate](#wgfeel-token-rotate) | Revoke the old administrator token and print the new token once |
 
 <a id="wgfeel-install"></a>
@@ -65,7 +65,7 @@ Administrative commands discover the installed Management socket automatically. 
 wgfeel install [--control main|child] [OPTIONS]
 ```
 
-Install one wgfeel executable, one wgfeel.service, manuals, completions and protected state under instance/. Main can also carry user traffic. Run without arguments for the interactive menus. On main, choose the traffic mode and both ports. A child stays stopped until join. Existing state is preserved; use update for an existing installation.
+Install the wgfeel executable, wgfeel.service, manual page, shell completions and protected state under instance/. Run without arguments for interactive menus. On main, choose the traffic mode, HTTP API port and WireGuard UDP port. A child stays stopped until wgfeel join. Existing state is preserved; use wgfeel update to upgrade.
 
 | Argument / option | Description |
 | --- | --- |
@@ -258,7 +258,7 @@ wgfeel init --control child --state-dir /srv/wgfeel/state --id child1
 wgfeel serve --control main|child --state-dir PATH [OPTIONS]
 ```
 
-Run the selected control capability in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use --listen-ip and recover the assigned port from their committed binding. For a foreground child with an explicit bind address, use --listen. The executable name does not select authority.
+Run main or child in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use --listen-ip and read the assigned port from their saved configuration. For a manually started child, pass --listen.
 
 | Argument / option | Description |
 | --- | --- |
@@ -309,7 +309,7 @@ wgfeel user
 
 Open the interactive administration menus. Select users and devices by number; names are separate from generated IDs. The menus also provide suspension and resumption of a user's isolated network.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -327,7 +327,7 @@ wgfeel user list
 
 List users with their IDs, names, device counts and suspension status, then allow interactive selection. Enter 0 to return.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -345,7 +345,7 @@ wgfeel user show [ID]
 
 Open a user's details and device menu. Omit ID to select a user interactively.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -365,9 +365,9 @@ wgfeel user show
 wgfeel user add [NAME]
 ```
 
-Create a user and its isolated network. Ask for the user name when omitted, then ask for the first device name. IDs, addresses and keys are generated. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
+Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -389,7 +389,7 @@ wgfeel user remove [--id ID]
 
 Display the selected user and ask for confirmation before deleting the user and its devices. Omit --id to choose interactively. Confirmation defaults to no.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -411,7 +411,7 @@ wgfeel device add [--user ID] [--name NAME]
 
 Create a device in the selected user's network, then open its details. Ask for any omitted user or device name. Import the generated WireGuard configuration into the device's native client.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -434,7 +434,7 @@ wgfeel device show [ID]
 
 Open device details, including its WireGuard client configuration. Omit ID to select the owner and device interactively. The client configuration contains a private key; handle the displayed output as a secret.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -456,7 +456,7 @@ wgfeel device delete [ID]
 
 Display the device and ask for confirmation before deleting it. Omit ID to select interactively. Confirmation defaults to no.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -476,9 +476,9 @@ wgfeel device delete
 wgfeel node list
 ```
 
-List Nodes registered with Management and their public enrollment information.
+List nodes registered on main and their public enrollment information.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -494,13 +494,13 @@ wgfeel node list
 wgfeel node show ID
 ```
 
-Show public details of the selected registered Node.
+Show public details of the selected registered node.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
-| `ID` | Required registered Node ID. |
+| `ID` | Required registered node ID. |
 
 
 <a id="wgfeel-node-add"></a>
@@ -511,9 +511,9 @@ Accepts the [Management connection options](#management-connection).
 wgfeel node add [OPTIONS]
 ```
 
-Create a one-time invitation and print the main endpoints, child UDP port and wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re-enrolling an existing child requires its current mode. Treat the invitation as a credential.
+Create a one-time invitation and print main's endpoints, the child UDP port and the wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re-enrolling an existing child requires its current mode. Treat the invitation as a credential.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
@@ -535,13 +535,13 @@ wgfeel node add --traffic relay
 wgfeel node delete ID [--revision NUMBER]
 ```
 
-Display the Node and ask for confirmation before removing it from the desired configuration. Confirmation defaults to no.
+Display the node and ask for confirmation before removing it from the configuration. Confirmation defaults to no.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 | Argument / option | Description |
 | --- | --- |
-| `ID` | Required registered Node ID. |
+| `ID` | Required registered node ID. |
 | `--revision NUMBER` | Expected positive configuration revision; otherwise use the current revision. |
 
 
@@ -553,9 +553,9 @@ Accepts the [Management connection options](#management-connection).
 wgfeel config show
 ```
 
-Display the public desired Management configuration.
+Display the public desired configuration on main.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -571,9 +571,9 @@ wgfeel config show
 wgfeel config identity
 ```
 
-Display the public Management identity and enrollment information.
+Display main's public service identity and enrollment information.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -589,9 +589,9 @@ wgfeel config identity
 wgfeel config distribution
 ```
 
-Display configuration delivery status for Nodes.
+Display configuration delivery status for registered nodes.
 
-Accepts the [Management connection options](#management-connection).
+Accepts the [connection options](#connection-options).
 
 Example:
 
@@ -607,7 +607,7 @@ wgfeel config distribution
 wgfeel token rotate [--revision NUMBER]
 ```
 
-Revoke the old administrator token and print the new token once. Available only through installed local administration, without --profile, --socket or --credential-file. Preserve the new token securely.
+Revoke the old administrator token and print the new token once. In the CLI this uses installed local administration only, without --profile, --socket or --credential-file (HTTP integrations can rotate tokens via POST /api/v1/token/rotate). Store the new token securely.
 
 | Argument / option | Description |
 | --- | --- |

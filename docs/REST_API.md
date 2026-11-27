@@ -1,67 +1,72 @@
-# External REST API
+# External HTTP REST API
 
-The REST API is an HTTP/TCP listener on main for web-panel backends and other
-integrations. It is separate from the internal WireGuard/UDP node-control
-protocol. Internal enrollment and configuration RPC paths are not exposed over
-HTTP. See the [node model](ARCHITECTURE.md).
-Remote CLI profiles use an authenticated WireGuard connection to the same UDP
-listener as the mesh. HTTP integrations use the separate REST listener and an
-administrator bearer token.
+`main` runs an optional HTTP/1.1 TCP listener for web panels and external
+integrations. It is separate from the internal WireGuard/UDP transport used for
+node enrollment, configuration delivery and remote CLI profiles (`--profile`).
 
-Nodes connect to main through service WireGuard on the shared UDP port, including
-their initial enrollment, key verification and configuration delivery. These
-operations work with the HTTP listener disabled. An administrator may issue an
-invitation through REST, but the child consumes it using WireGuard, never HTTP.
+Internal node RPCs are never exposed over HTTP, and node enrollment/delivery
+continues to work even when the HTTP listener is disabled. An integration can
+issue a node invitation through REST, but the child always consumes it over
+WireGuard UDP.
 
 ## OpenAPI contract
 
-`GET /api/v1/openapi.json` serves the [OpenAPI 3.1 document](openapi.json)
-embedded in the running binary as `application/json`. Send the same `Authorization: Bearer YOUR_TOKEN`
-header as for other REST reads. Fetching the schema also requires the current
-token over the owner socket. A missing, invalid or revoked token receives `401`.
+`GET /api/v1/openapi.json` returns the [OpenAPI 3.1 document](openapi.json)
+embedded in the binary (`application/json`).
 
-`cargo docs` generates the file from the HTTP route declarations, Rust wire
-types and their field documentation. Run `cargo docs --check` to verify that
-the file matches the code before building.
+Fetching the schema requires `Authorization: Bearer YOUR_TOKEN` on every
+transport, including `main`'s local owner-only Unix socket (`state/api.sock`).
+Missing, invalid or revoked tokens receive `401`.
+
+`cargo docs` generates [openapi.json](openapi.json) directly from the route
+definitions and Rust wire types; `cargo docs --check` verifies it is up to
+date.
 
 ## Configure the listener
 
-Interactive installation asks for the external HTTP port. The default is `9280`,
-bound to `127.0.0.1`. Noninteractive installation accepts `--api-port PORT` and
-`--api-listen-ip IP`. The low-level `init --control main` command enables HTTP only
-when `--api-port` is supplied.
+`wgfeel install --control main` enables the HTTP listener on `127.0.0.1:9280`
+by default (customizable with `--api-port` and `--api-listen-ip`, or through
+the interactive menu). The low-level `wgfeel init --control main` command keeps
+HTTP disabled unless `--api-port` is passed.
 
-Show the configured address or change the port locally on main:
+Inspect or change the port locally on `main` (requires local state-owner
+permissions; not callable over REST):
 
 ```sh
 wgfeel api port
 wgfeel api port 8081
 ```
 
-The running service opens the new port, saves the setting, and closes the old
-listener. If the new port is unavailable, the previous listener and stored
-configuration remain unchanged. This operation does not restart or reconfigure
-WireGuard. If the service is stopped, it saves the port for the next start after
-checking that it can be bound. An uncertain disk commit is reported as an error;
-inspect the current setting with `wgfeel api port` before retrying.
+- **Running service**: binds the new port first, persists the setting, then
+  closes the old listener. If binding fails, the existing listener and stored
+  settings stay unchanged. WireGuard is never restarted or reconfigured.
+- **Stopped service**: verifies the port can be bound and saves it for the next
+  start.
+- **Uncertain disk commit**: reported as an error; run `wgfeel api port` to
+  inspect the active setting before retrying.
 
-`--install-dir PATH` selects a custom installation. `--state-dir PATH` selects
-an explicitly initialized main state directory instead. Changing this setting
-requires the local state owner's permissions; it is not a remotely callable REST
-operation.
+Pass `--install-dir PATH` for a custom installation or `--state-dir PATH` for a
+manually initialized `main` state directory.
 
 ## Authentication and requests
 
-Issue an administrator token locally with `wgfeel token rotate`. The command
-prints the new token once and invalidates the previous token. wgfeel stores its
-verifier, not the clear-text token. Keep the token in the integration's protected
-configuration and send it as an `Authorization: Bearer ...` header.
+Issue an administrator bearer token locally on `main`:
 
-Even loopback HTTP requests require a token. Forwarded headers do not bypass
-authentication. The default loopback listener is suitable for a local web-panel
-backend or a TLS reverse proxy. Direct HTTP provides no transport encryption.
+```sh
+wgfeel token rotate
+```
 
-For example, a panel backend can read users with this HTTP/1.1 request:
+This prints the new token once and revokes the previous one. `main` stores only
+an HMAC-SHA256 verifier, never the raw token. Send the token in the
+`Authorization: Bearer ...` header on every request.
+
+- Loopback requests also require a bearer token; forwarded headers never bypass
+  authentication.
+- Direct HTTP has no TLS; use the default loopback listener for a local panel
+  backend or place a TLS reverse proxy in front for remote access.
+- Browser sessions, cookies and CORS are not implemented.
+
+Example HTTP/1.1 request:
 
 ```http
 GET /api/v1/users HTTP/1.1
@@ -70,37 +75,72 @@ Authorization: Bearer YOUR_TOKEN
 Connection: close
 ```
 
-Successful administrative responses carry an `ETag` with the configuration
-revision. Configuration mutations and token rotation require the matching
-`If-Match` header: a missing header receives `428`, a malformed revision `400`, and
-a stale revision `412`.
+### Optimistic concurrency and HTTP framing
 
-`POST /api/v1/node-invitations` creates a temporary invitation without changing
-the configuration revision. Its `If-Match` header is optional, but when supplied
-it must match the current revision (the same `400`/`412` errors apply). This checks
-the revision at issuance; it does not reserve that revision for later enrollment.
+- Every successful response includes an `ETag` header containing the quoted
+  configuration revision (for example `"7"`).
+- Configuration changes and token rotation require a matching `If-Match`
+  header: missing returns `428`, malformed returns `400`, stale returns `412`.
+- `POST /api/v1/node-invitations` does not change the configuration revision.
+  `If-Match` is optional; when provided, it is checked at issuance (`400`/`412`)
+  without reserving that revision for later enrollment.
+- **All `POST` requests**—including empty-body requests such as
+  `POST /api/v1/token/rotate` and `POST /api/v1/node-invitations`—must send
+  exact `Content-Type: application/json` (`415` otherwise) and `Content-Length`
+  (`411` otherwise).
+- `POST /api/v1/users/{user}/suspend` and `resume` require the exact two-byte
+  body `{}`.
+- Requests, headers and connection lifetimes are bounded; rate-limited requests
+  receive `429`.
 
-JSON POST requests require `Content-Type: application/json` and `Content-Length`.
-Requests and connection lifetimes are bounded; rate-limited requests receive `429`.
+## Endpoints
 
-Available administrative resources include `/api/v1/users`, user devices,
-`/api/v1/gateways`, `/api/v1/config`, node invitations and token rotation. Device
-configuration responses contain private keys and must be treated as secrets.
-The API is intended for an authenticated integration backend; browser sessions,
-cookies and CORS are not implemented by this listener.
+Full request/response schemas and error codes are in [openapi.json](openapi.json).
 
-`GET /api/v1/users/{user}/devices/{device}/config` returns the WireGuard text
-shown by `wgfeel device show`. Each entry Node serving the user's network is
-labelled with its hostname and ID, or just its ID when no hostname is available.
-Each Node has its own `[Peer]` section with a public key and one preferred
-`Endpoint`. Endpoints are grouped by IPv4 and IPv6, with alternative addresses
-in comments. Only the device's assigned Node has `AllowedIPs` and
-`PersistentKeepalive`. Routing traffic through a different Node requires
-assigning the device to it and importing the updated configuration.
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/v1/openapi.json` | Embedded OpenAPI 3.1 specification |
+| `GET /api/v1/identity` | `main`'s node ID and service public key |
+| `GET /api/v1/config` | Public desired configuration at the current revision |
+| `GET /api/v1/distribution` | Desired and acknowledged revision per node |
+| `GET`, `POST /api/v1/users` | List users or create a user and isolated network |
+| `GET`, `DELETE /api/v1/users/{user}` | Read or delete a user and its devices |
+| `POST /api/v1/users/{user}/suspend`, `resume` | Suspend or resume a user's network (body: `{}`) |
+| `GET`, `POST /api/v1/users/{user}/devices` | List or provision devices for a user |
+| `GET`, `DELETE /api/v1/users/{user}/devices/{device}` | Read metadata or delete a device |
+| `GET /api/v1/users/{user}/devices/{device}/config` | Export WireGuard config (`text/plain`, contains private key; optional `/{network}` suffix) |
+| `GET`, `POST /api/v1/gateways` | List registered nodes or register one manually |
+| `GET`, `DELETE /api/v1/gateways/{gateway}` | Read or remove a registered node |
+| `POST /api/v1/node-invitations` | Issue a one-time child enrollment invitation |
+| `POST /api/v1/token/rotate` | Rotate the bearer token (available over REST with the current bearer token; the CLI `wgfeel token rotate` is local-only) |
 
-Manual `POST /api/v1/gateways` registration requires both `public_key` (service)
-and `gateway_public_key` (mesh), encoded in base64. They must be distinct. Normal
-enrollment obtains these from the node through a one-time invitation. Public
-configuration responses name them `service_public_key` and `gateway_public_key`.
+## Device configurations
 
-[README](../README.md) · [Command reference](docs.md) · [Security policy](SECURITY.md)
+`GET /api/v1/users/{user}/devices/{device}/config` returns the same WireGuard
+text as `wgfeel device show`. Treat it as a secret: it contains the device's
+private key.
+
+- Each `entry` node serving the user appears as a `[Peer]` section labelled
+  with its hostname and ID (or ID alone).
+- Alternative addresses are grouped under `# IPv4` and `# IPv6` as commented
+  `Endpoint` lines; only the device's assigned home `entry` has `AllowedIPs`
+  and `PersistentKeepalive`.
+- Set `gateway` when creating a device to choose its home `entry`. The API
+  supports this choice only at creation.
+
+## Register or retire a child node
+
+Normal child onboarding uses `POST /api/v1/node-invitations` and `wgfeel join`.
+Manual `POST /api/v1/gateways` registration requires distinct base64
+`public_key` (service) and `gateway_public_key` (mesh) values. Public read
+responses return those fields as `service_public_key` and `gateway_public_key`.
+
+`DELETE /api/v1/gateways/{gateway}` retires the child for all users. Before
+retiring an `entry`, check that another `entry` with an advertised endpoint
+serves each affected user's network. `main` assigns devices whose home was the
+retired node to an eligible replacement. Export a new profile for each of those
+devices and import it on the client. If a network has no replacement, profile
+export for its affected devices returns `409 gateway_unavailable`.
+
+[README](../README.md) · [Getting started](GETTING_STARTED.md) ·
+[Command reference](docs.md) · [Architecture](ARCHITECTURE.md) · [Security policy](SECURITY.md)

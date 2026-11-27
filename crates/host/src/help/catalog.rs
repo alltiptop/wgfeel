@@ -24,11 +24,11 @@ const ENDPOINT: OptionHelp = (
 pub(super) const CONNECTION: &[OptionHelp] = &[
     (
         "--profile PATH",
-        "Use an existing private administrator profile for remote access over WireGuard. Cannot be combined with --socket or --credential-file.",
+        "Use a private administrator profile for remote access over WireGuard. Cannot be combined with --socket or --credential-file.",
     ),
     (
         "--socket PATH",
-        "Use a local Management API socket; requires --credential-file.",
+        "Use a local main Unix socket; requires --credential-file.",
     ),
     (
         "--credential-file PATH",
@@ -58,7 +58,7 @@ pub(super) fn commands() -> Vec<CommandHelp> {
         command(
             "install",
             "[--control main|child] [OPTIONS]",
-            "Install one wgfeel executable, one wgfeel.service, manuals, completions and protected state under instance/. Main can also carry user traffic. Run without arguments for the interactive menus. On main, choose the traffic mode and both ports. A child stays stopped until join. Existing state is preserved; use update for an existing installation.",
+            "Install the wgfeel executable, wgfeel.service, manual page, shell completions and protected state under instance/. Run without arguments for interactive menus. On main, choose the traffic mode, HTTP API port and WireGuard UDP port. A child stays stopped until wgfeel join. Existing state is preserved; use wgfeel update to upgrade.",
             &[
                 (
                     "--control main|child",
@@ -235,7 +235,7 @@ fn instance() -> Vec<CommandHelp> {
         command(
             "serve",
             "--control main|child --state-dir PATH [OPTIONS]",
-            "Run the selected control capability in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use --listen-ip and recover the assigned port from their committed binding. For a foreground child with an explicit bind address, use --listen. The executable name does not select authority.",
+            "Run main or child in the foreground. Main uses its stored WireGuard and optional HTTP listeners. Installed children use --listen-ip and read the assigned port from their saved configuration. For a manually started child, pass --listen.",
             &[
                 (
                     "--control main|child",
@@ -307,7 +307,7 @@ fn administration() -> Vec<CommandHelp> {
         command(
             "user add",
             "[NAME]",
-            "Create a user and its isolated network. Ask for the user name when omitted, then ask for the first device name. IDs, addresses and keys are generated. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.",
+            "Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.",
             &[("NAME", "Friendly user name; quote names containing spaces.")],
             &["wgfeel user add Alice"],
         ),
@@ -351,21 +351,21 @@ fn administration() -> Vec<CommandHelp> {
         command(
             "node list",
             "",
-            "List Nodes registered with Management and their public enrollment information.",
+            "List nodes registered on main and their public enrollment information.",
             &[],
             &["wgfeel node list"],
         ),
         command(
             "node show",
             "ID",
-            "Show public details of the selected registered Node.",
-            &[("ID", "Required registered Node ID.")],
+            "Show public details of the selected registered node.",
+            &[("ID", "Required registered node ID.")],
             &[],
         ),
         command(
             "node add",
             "[OPTIONS]",
-            "Create a one-time invitation and print the main endpoints, child UDP port and wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re-enrolling an existing child requires its current mode. Treat the invitation as a credential.",
+            "Create a one-time invitation and print main's endpoints, the child UDP port and the wgfeel join command. Main fixes the traffic mode in the invitation; the child cannot override it. Re-enrolling an existing child requires its current mode. Treat the invitation as a credential.",
             &[
                 (
                     "--traffic entry|relay|off",
@@ -381,9 +381,9 @@ fn administration() -> Vec<CommandHelp> {
         command(
             "node delete",
             "ID [--revision NUMBER]",
-            "Display the Node and ask for confirmation before removing it from the desired configuration. Confirmation defaults to no.",
+            "Display the node and ask for confirmation before removing it from the configuration. Confirmation defaults to no.",
             &[
-                ("ID", "Required registered Node ID."),
+                ("ID", "Required registered node ID."),
                 (
                     "--revision NUMBER",
                     "Expected positive configuration revision; otherwise use the current revision.",
@@ -394,28 +394,28 @@ fn administration() -> Vec<CommandHelp> {
         command(
             "config show",
             "",
-            "Display the public desired Management configuration.",
+            "Display the public desired configuration on main.",
             &[],
             &["wgfeel config show"],
         ),
         command(
             "config identity",
             "",
-            "Display the public Management identity and enrollment information.",
+            "Display main's public service identity and enrollment information.",
             &[],
             &["wgfeel config identity"],
         ),
         command(
             "config distribution",
             "",
-            "Display configuration delivery status for Nodes.",
+            "Display configuration delivery status for registered nodes.",
             &[],
             &["wgfeel config distribution"],
         ),
         command(
             "token rotate",
             "[--revision NUMBER]",
-            "Revoke the old administrator token and print the new token once. Available only through installed local administration, without --profile, --socket or --credential-file. Preserve the new token securely.",
+            "Revoke the old administrator token and print the new token once. In the CLI this uses installed local administration only, without --profile, --socket or --credential-file (HTTP integrations can rotate tokens via POST /api/v1/token/rotate). Store the new token securely.",
             &[(
                 "--revision NUMBER",
                 "Expected positive configuration revision; otherwise use the current revision.",
