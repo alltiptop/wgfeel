@@ -14,7 +14,7 @@
   packet delivery, CPU usage and peak memory across runs.
 - [ ] **Publish releases.** Publish the Linux x86-64 `wgfeel` binary with a
   checksum and release notes after the version tag passes release CI.
-- [ ] **External WireGuard gateways per user.** Assign an external WireGuard
+- [x] **External WireGuard gateways per user.** Assign an external WireGuard
   profile to a designated wgfeel node and grant one or more users access to it.
   Their entry nodes forward matching traffic through the mesh to that node,
   which holds the tunnel key and connects to the independently operated gateway.
@@ -29,9 +29,9 @@
   on that side until a route returns. Any future automatic takeover requires
   both an outage and exclusive use of the external profile by the new node.
 
-  Test both modes against a separate WireGuard server. Verify which
-  traffic exits there, that unassigned users cannot use it through wgfeel, and
-  that users sharing it cannot reach each other's devices. Revoking one user's
-  assignment must preserve access for the others.
+  - [x] [Test both modes end to end](../crates/wgfeel/tests/support/provider_policy.rs)
+    against a local WireGuard peer. The test checks which IPv4 traffic reaches
+    the peer, denies access to an unassigned user, and verifies isolation between
+    users' devices. Revoking one user's grant preserves another user's UDP flow.
 
 [README](../README.md) · [Contributing](CONTRIBUTING.md)

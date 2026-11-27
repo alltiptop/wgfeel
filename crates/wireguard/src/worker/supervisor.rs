@@ -638,11 +638,17 @@ impl WorkerGateway {
         let (slot, peer) = self.select(context, peer)?;
         Ok(self.workers[slot].peers[usize::from(peer)].endpoint)
     }
-    pub(super) fn provider_authenticated(&self, id: &wgfeel_core::EgressId) -> Option<Instant> {
+    fn provider_worker(&self, id: &wgfeel_core::EgressId) -> Option<&Worker> {
         self.workers
             .iter()
-            .find(|w| matches!(&w.context,ContextId::External(e) if e==id))?
-            .provider_authenticated
+            .find(|w| matches!(&w.context, ContextId::External(e) if e == id))
+    }
+    pub(super) fn provider_ready(&self, id: &wgfeel_core::EgressId, pid: u32) -> bool {
+        self.provider_worker(id)
+            .is_some_and(|w| w.pid == pid && w.ready().is_ok())
+    }
+    pub(super) fn provider_authenticated(&self, id: &wgfeel_core::EgressId) -> Option<Instant> {
+        self.provider_worker(id)?.provider_authenticated
     }
     pub(super) fn generation_is_active(&self, context: &ContextId, generation: u64) -> bool {
         self.workers.iter().any(|worker| {

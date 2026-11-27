@@ -482,7 +482,7 @@ fn serve(
             })
             .fold(Duration::from_millis(2), Duration::min);
         let mut readable = vec![socket.as_fd(), signals.as_fd()];
-        egress.append_fds(&mut readable);
+        egress.append_fds(&gateway, &mut readable);
         gateway
             .wait_for_activity(&readable, wait)
             .map_err(|_| "cannot wait for node activity")?;

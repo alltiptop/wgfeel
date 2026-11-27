@@ -1097,6 +1097,10 @@ impl LocalGateway {
         }
     }
 
+    /// Whether the worker owning this provider socket can accept a datagram now.
+    pub fn provider_ready(&self, id: &EgressId, pid: u32) -> bool {
+        self.raw.provider_ready(id, pid)
+    }
     pub fn provider_authenticated(&self, id: &EgressId) -> Option<Instant> {
         self.raw.provider_authenticated(id)
     }

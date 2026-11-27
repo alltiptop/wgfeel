@@ -1,6 +1,11 @@
 use super::*;
 use serde_json::json;
 
+#[path = "provider_policy.rs"]
+mod provider_policy;
+#[path = "provider_probe.rs"]
+mod provider_probe;
+
 const INTERFACE_KEY: [u8; 32] = [41; 32];
 const PROVIDER_KEY: [u8; 32] = [42; 32];
 const PSK: [u8; 32] = [43; 32];
@@ -30,11 +35,11 @@ fn provider_socket() -> UdpSocket {
     socket
 }
 
-fn provider_config(endpoint: SocketAddr) -> String {
+fn provider_config(endpoint: SocketAddr, allowed_ips: &str) -> String {
     let public = PublicKey::from(&StaticSecret::from(PROVIDER_KEY));
     format!(
         "[Interface]\nPrivateKey = {}\nAddress = {TUNNEL_ADDRESS}/32\n\
-         [Peer]\nPublicKey = {}\nPresharedKey = {}\nEndpoint = {endpoint}\nAllowedIPs = {PREFIX}\n",
+         [Peer]\nPublicKey = {}\nPresharedKey = {}\nEndpoint = {endpoint}\nAllowedIPs = {allowed_ips}\n",
         STANDARD.encode(INTERFACE_KEY),
         STANDARD.encode(public.as_bytes()),
         STANDARD.encode(PSK),
@@ -147,13 +152,14 @@ impl Provider {
     }
 }
 
-fn wait_for_placement(manager: &Fixture, placement: &str, owner: &str) {
+fn wait_for_placement(manager: &Fixture, placement: &str, owner: &str, revision: u64) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let placed = api::json(&manager.state(), "GET", placement, Value::Null);
         let status = api::json(&manager.state(), "GET", "/api/v1/distribution", Value::Null);
         let gateways = status["gateways"].as_array().unwrap();
         if placed["node"] == owner
+            && status["generation"].as_u64().unwrap() >= revision
             && gateways.len() == 2
             && gateways.iter().all(|node| node["status"] == "applied")
         {
@@ -161,7 +167,7 @@ fn wait_for_placement(manager: &Fixture, placement: &str, owner: &str) {
         }
         assert!(
             Instant::now() < deadline,
-            "egress placement on {owner} was not applied"
+            "egress placement on {owner} was not applied at revision {revision} or later"
         );
         thread::sleep(Duration::from_millis(50));
     }
@@ -192,16 +198,22 @@ fn provider_udp_roundtrip_survives_a_move_from_main_to_child() {
         &manager.state(),
         "POST",
         "/api/v1/egresses",
-        json!({"config":provider_config(provider.socket.local_addr().unwrap()), "node":"management",
+        json!({"config":provider_config(provider.socket.local_addr().unwrap(), PREFIX), "node":"management",
             "users":[{"user":user, "routes":[PREFIX], "dns":{"mode":"none"}}]}),
     );
     let placement = format!("/api/v1/egresses/{}/node", egress["id"].as_str().unwrap());
-    wait_for_placement(&manager, &placement, "management");
+    wait_for_placement(
+        &manager,
+        &placement,
+        "management",
+        egress["generation"].as_u64().unwrap(),
+    );
     let mut client = Client::from_config(&exported(&manager, "alice", "phone"));
     client.establish();
     provider.exchange(&mut client, 17);
 
-    api::json(&manager.state(), "PUT", &placement, json!({"node":"exit"}));
-    wait_for_placement(&manager, &placement, "exit");
+    let moved = api::request(&manager.state(), "PUT", &placement, &json!({"node":"exit"}));
+    assert_eq!(moved.status, 202);
+    wait_for_placement(&manager, &placement, "exit", moved.generation.unwrap());
     provider.exchange(&mut client, 39);
 }

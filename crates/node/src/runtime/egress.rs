@@ -150,6 +150,14 @@ impl Provider {
         }
         false
     }
+    // Each worker accepts one operation at a time. Leave ciphertext in the socket
+    // while a receive, send or timer is pending. The worker pipe wakes the node.
+    fn readable_socket(&self, gateway: &LocalGateway) -> Option<&(UdpSocket, SocketAddr)> {
+        let socket = self.socket.as_ref()?;
+        gateway
+            .provider_ready(&self.profile.id, self.worker_pid)
+            .then_some(socket)
+    }
     fn poll(&mut self, gateway: &mut LocalGateway, now: Instant) {
         if now >= self.tick
             && self.handshakes.unanswered.is_some()
@@ -299,11 +307,11 @@ impl Runtime {
             .collect();
         self.cursor = 0;
     }
-    pub fn append_fds<'a>(&'a self, fds: &mut Vec<BorrowedFd<'a>>) {
+    pub fn append_fds<'a>(&'a self, gateway: &LocalGateway, fds: &mut Vec<BorrowedFd<'a>>) {
         fds.extend(
             self.providers
                 .iter()
-                .filter_map(|p| p.socket.as_ref().map(|(s, _)| s.as_fd())),
+                .filter_map(|p| p.readable_socket(gateway).map(|(s, _)| s.as_fd())),
         );
     }
     pub fn failed(&mut self, context: &ContextId) {
@@ -334,10 +342,11 @@ impl Runtime {
             let index = self.cursor;
             self.cursor = (self.cursor + 1) % self.providers.len();
             let p = &mut self.providers[index];
-            let Some((socket, source)) = &p.socket else {
+            let Some((socket, source)) = p.readable_socket(gateway) else {
                 quiet += 1;
                 continue;
             };
+            let source = *source;
             match socket.recv(&mut self.buffer) {
                 Ok(n) => {
                     p.backoff = Duration::from_secs(1);
@@ -345,7 +354,7 @@ impl Runtime {
                     quiet = 0;
                     if n <= wgfeel_wireguard::MAX_PROVIDER_DATAGRAM_SIZE
                         && let Ok(Some(output)) =
-                            gateway.receive_provider(&p.profile.id, *source, &self.buffer[..n])
+                            gateway.receive_provider(&p.profile.id, source, &self.buffer[..n])
                     {
                         p.send(gateway, &output)
                     }
