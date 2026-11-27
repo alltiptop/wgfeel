@@ -18,5 +18,9 @@ rustix = { workspace = true, features = ["net"] }
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64"))'.dependencies]
 nix = { workspace = true, features = ["net"] }
 
+[dev-dependencies]
+# The docs generator must also compile when docs/openapi.json is missing.
+wgfeel-management = { path = "../management", default-features = false }
+
 [lints]
 workspace = true

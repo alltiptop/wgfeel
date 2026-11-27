@@ -12,7 +12,7 @@ pub const MAX_NODE_ENDPOINTS: usize = 16;
 pub const MAX_PROJECTION_BYTES: usize = crate::MAX_CONFIG_BYTES + 65_536;
 pub const PROJECTION_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct TenantKeyAssignment {
     network: NetworkId,
     public_key: DevicePublicKey,
@@ -36,7 +36,7 @@ impl TenantKeyAssignment {
 }
 
 /// Policy scope is independent of the subset of locally terminated tenant contexts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct GatewayAssignment {
     recipient: NodeId,
     service_public_key: DevicePublicKey,

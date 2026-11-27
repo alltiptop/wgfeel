@@ -1,0 +1,2822 @@
+{
+  "components": {
+    "responses": {
+      "ApiError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Administrative API error."
+      },
+      "Error400": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Malformed HTTP request, input or revision."
+      },
+      "Error401": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Missing or invalid administrator bearer token.",
+        "headers": {
+          "WWW-Authenticate": {
+            "required": true,
+            "schema": {
+              "const": "Bearer"
+            }
+          }
+        }
+      },
+      "Error404": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Resource not found."
+      },
+      "Error409": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The resource conflicts with the current state."
+      },
+      "Error411": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Content-Length is required."
+      },
+      "Error412": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The supplied revision is stale."
+      },
+      "Error413": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The request exceeds the size limit."
+      },
+      "Error415": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "POST requires application/json."
+      },
+      "Error422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The requested configuration is invalid."
+      },
+      "Error428": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The If-Match revision is required."
+      },
+      "Error429": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Request or invitation limit reached."
+      },
+      "Error431": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Request headers exceed the limit."
+      },
+      "Error500": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "The server could not encode the response or complete the operation."
+      },
+      "Error503": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorBody"
+            }
+          }
+        },
+        "description": "Management state or a required service is unavailable."
+      }
+    },
+    "schemas": {
+      "Action": {
+        "enum": [
+          "allow",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ChangeDistribution": {
+        "enum": [
+          "pending"
+        ],
+        "type": "string"
+      },
+      "ChangeReceipt": {
+        "properties": {
+          "distribution": {
+            "$ref": "#/components/schemas/ChangeDistribution",
+            "description": "Newly committed changes await delivery to nodes."
+          },
+          "generation": {
+            "description": "Configuration revision after the change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "ID of the affected user, device or node.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "generation",
+          "distribution"
+        ],
+        "type": "object"
+      },
+      "Client": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/ClientDevice"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "networks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "networks",
+          "devices"
+        ],
+        "type": "object"
+      },
+      "ClientDevice": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/DeviceMetadata"
+          }
+        },
+        "required": [
+          "id",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "DeliveryStatus": {
+        "enum": [
+          "unconfigured",
+          "applied",
+          "pending"
+        ],
+        "type": "string"
+      },
+      "Device": {
+        "properties": {
+          "addresses": {
+            "description": "Tunnel addresses assigned within this network.",
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "gateway": {
+            "description": "Entry node assigned to the device.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hostname": {
+            "description": "Stable DNS label within the owner's network.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          }
+        },
+        "required": [
+          "id",
+          "public_key",
+          "addresses"
+        ],
+        "type": "object"
+      },
+      "DeviceMetadata": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Human-readable device name, if configured.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "type": "object"
+      },
+      "DevicePublicKey": {
+        "description": "Structurally valid public key; possession is established by WireGuard later.",
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
+      },
+      "Devices": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/ClientDevice"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "type": "object"
+      },
+      "Distribution": {
+        "properties": {
+          "gateways": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayDelivery"
+            },
+            "type": "array"
+          },
+          "generation": {
+            "description": "Current configuration revision.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation",
+          "gateways"
+        ],
+        "type": "object"
+      },
+      "Endpoint": {
+        "properties": {
+          "device": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "network",
+          "device"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "properties": {
+          "error": {
+            "description": "Machine-readable reason for the failure.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Gateway": {
+        "properties": {
+          "auto_users": {
+            "description": "Whether newly created user networks are assigned automatically.",
+            "type": "boolean"
+          },
+          "endpoint": {
+            "description": "Preferred contact address, when configured.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "gateway_public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipient": {
+            "description": "ID of the node receiving configuration.",
+            "type": "string"
+          },
+          "service_public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          },
+          "tenants": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayTenant"
+            },
+            "type": "array"
+          },
+          "users": {
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipient",
+          "service_public_key",
+          "gateway_public_key",
+          "endpoint",
+          "endpoints",
+          "hostname",
+          "auto_users",
+          "users",
+          "tenants"
+        ],
+        "type": "object"
+      },
+      "GatewayAssignment": {
+        "description": "Policy scope is independent of the subset of locally terminated tenant contexts.",
+        "properties": {
+          "auto_networks": {
+            "type": "boolean"
+          },
+          "endpoints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "gateway_public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "networks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "recipient": {
+            "type": "string"
+          },
+          "service_public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          },
+          "tenants": {
+            "items": {
+              "$ref": "#/components/schemas/TenantKeyAssignment"
+            },
+            "type": "array"
+          },
+          "traffic": {
+            "$ref": "#/components/schemas/TrafficMode"
+          }
+        },
+        "required": [
+          "recipient",
+          "service_public_key",
+          "gateway_public_key",
+          "networks",
+          "tenants",
+          "endpoints",
+          "traffic"
+        ],
+        "type": "object"
+      },
+      "GatewayDelivery": {
+        "properties": {
+          "acknowledged": {
+            "description": "Last revision acknowledged by the node, if any.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "desired": {
+            "description": "Revision this node should apply.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeliveryStatus"
+          }
+        },
+        "required": [
+          "id",
+          "desired",
+          "acknowledged",
+          "status"
+        ],
+        "type": "object"
+      },
+      "GatewayTenant": {
+        "properties": {
+          "public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "user",
+          "public_key"
+        ],
+        "type": "object"
+      },
+      "Gateways": {
+        "properties": {
+          "gateways": {
+            "items": {
+              "$ref": "#/components/schemas/Gateway"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "gateways"
+        ],
+        "type": "object"
+      },
+      "Grant": {
+        "properties": {
+          "destination": {
+            "$ref": "#/components/schemas/Endpoint"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Endpoint"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "Identity": {
+        "properties": {
+          "management_id": {
+            "type": "string"
+          },
+          "public_key": {
+            "description": "Base64 service public key of main.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "management_id",
+          "public_key"
+        ],
+        "type": "object"
+      },
+      "IssuedInvitation": {
+        "properties": {
+          "expires_at": {
+            "description": "Expiration time in Unix seconds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invitation": {
+            "description": "One-time enrollment URI. Treat it as a secret until it expires.",
+            "type": "string"
+          },
+          "traffic": {
+            "$ref": "#/components/schemas/TrafficMode",
+            "description": "Traffic capability selected at issuance."
+          }
+        },
+        "required": [
+          "invitation",
+          "expires_at",
+          "traffic"
+        ],
+        "type": "object"
+      },
+      "Network": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/Device"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "private_lan": {
+            "type": "boolean"
+          },
+          "suspended": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "devices"
+        ],
+        "type": "object"
+      },
+      "Policy": {
+        "properties": {
+          "global_rules": {
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "type": "array"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/Grant"
+            },
+            "type": "array"
+          },
+          "local_rules": {
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "global_rules",
+          "local_rules",
+          "grants"
+        ],
+        "type": "object"
+      },
+      "RotatedToken": {
+        "properties": {
+          "token": {
+            "description": "New administrator bearer token, returned once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "Rule": {
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Endpoint"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Endpoint"
+          }
+        },
+        "required": [
+          "source",
+          "destination",
+          "action"
+        ],
+        "type": "object"
+      },
+      "TenantKeyAssignment": {
+        "properties": {
+          "network": {
+            "type": "string"
+          },
+          "public_key": {
+            "$ref": "#/components/schemas/DevicePublicKey"
+          }
+        },
+        "required": [
+          "network",
+          "public_key"
+        ],
+        "type": "object"
+      },
+      "TrafficMode": {
+        "description": "User traffic capability. Entry accepts devices, relay forwards mesh traffic, and off carries only control traffic.",
+        "enum": [
+          "entry",
+          "relay",
+          "off"
+        ],
+        "type": "string"
+      },
+      "User": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/ClientDevice"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "suspended": {
+            "description": "Whether traffic for this user's network is suspended.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "suspended",
+          "devices"
+        ],
+        "type": "object"
+      },
+      "Users": {
+        "properties": {
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "type": "object"
+      },
+      "WireConfig": {
+        "description": "Versioned routing and isolation policy shared by the managed networks.",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "networks": {
+            "items": {
+              "$ref": "#/components/schemas/Network"
+            },
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/Policy"
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generation",
+          "networks",
+          "policy"
+        ],
+        "type": "object"
+      },
+      "WireManagement": {
+        "description": "Public management configuration returned by the administrative API.",
+        "properties": {
+          "assignments": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayAssignment"
+            },
+            "type": "array"
+          },
+          "clients": {
+            "items": {
+              "$ref": "#/components/schemas/Client"
+            },
+            "type": "array"
+          },
+          "config": {
+            "$ref": "#/components/schemas/WireConfig",
+            "description": "Device registrations, networks and routing policy at this revision."
+          },
+          "management_id": {
+            "description": "ID of the authoritative main node.",
+            "type": "string"
+          },
+          "management_version": {
+            "description": "Management document format version.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "management_version",
+          "management_id",
+          "config",
+          "assignments",
+          "clients"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "adminBearer": {
+        "description": "An administrator API token issued by main.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "HTTP/1.1 administrative API on main. POST requires Content-Type: application/json and Content-Length, including requests with an empty body.",
+    "title": "wgfeel administrative REST API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.2",
+  "paths": {
+    "/api/v1/config": {
+      "get": {
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireManagement"
+                }
+              }
+            },
+            "description": "Read the public management configuration at the current revision.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Read the public management configuration at the current revision."
+      }
+    },
+    "/api/v1/distribution": {
+      "get": {
+        "operationId": "get_distribution",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Distribution"
+                }
+              }
+            },
+            "description": "List the desired and acknowledged configuration revision for each node.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List the desired and acknowledged configuration revision for each node."
+      }
+    },
+    "/api/v1/gateways": {
+      "get": {
+        "operationId": "list_gateways",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Gateways"
+                }
+              }
+            },
+            "description": "List registered nodes and their public keys.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List registered nodes and their public keys."
+      },
+      "post": {
+        "operationId": "create_gateway",
+        "parameters": [
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "auto_networks": {
+                    "description": "Automatically include user networks. Defaults to true for a node with an endpoint and no explicit scope or tenants.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "endpoint": {
+                    "description": "Node contact address and UDP port.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "gateway_public_key": {
+                    "description": "Distinct base64 public key for mesh traffic.",
+                    "type": "string"
+                  },
+                  "id": {
+                    "description": "Node ID. Omit to have the server assign an ID.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "networks": {
+                    "default": [],
+                    "description": "Scope expressed as network IDs.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "public_key": {
+                    "description": "Base64 public key for the node's service identity.",
+                    "type": "string"
+                  },
+                  "tenants": {
+                    "description": "Public keys for tenant networks terminated by this node.",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "network": {
+                          "description": "Identify the tenant by exactly one of network or user.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "public_key": {
+                          "description": "Base64 tenant public key.",
+                          "type": "string"
+                        },
+                        "user": {
+                          "description": "User who owns the network.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "public_key"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "traffic": {
+                    "default": "entry",
+                    "description": "Traffic capability assigned to this node.",
+                    "enum": [
+                      "entry",
+                      "relay",
+                      "off"
+                    ],
+                    "type": "string"
+                  },
+                  "users": {
+                    "default": [],
+                    "description": "Scope expressed as user IDs. Use either users or networks.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "public_key",
+                  "gateway_public_key"
+                ],
+                "title": "AddGateway",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Register a node with its service and mesh public keys.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Register a node with its service and mesh public keys."
+      }
+    },
+    "/api/v1/gateways/{gateway}": {
+      "delete": {
+        "operationId": "delete_gateway",
+        "parameters": [
+          {
+            "description": "The gateway ID.",
+            "in": "path",
+            "name": "gateway",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Remove a node from the configuration.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Remove a node from the configuration."
+      },
+      "get": {
+        "operationId": "get_gateway",
+        "parameters": [
+          {
+            "description": "The gateway ID.",
+            "in": "path",
+            "name": "gateway",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Gateway"
+                }
+              }
+            },
+            "description": "Get a registered node and its user assignments.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Get a registered node and its user assignments."
+      }
+    },
+    "/api/v1/identity": {
+      "get": {
+        "operationId": "get_identity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Identity"
+                }
+              }
+            },
+            "description": "Get main's public service identity.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Get main's public service identity."
+      }
+    },
+    "/api/v1/node-invitations": {
+      "post": {
+        "description": "The child consumes the invitation over WireGuard. Issuing it leaves the configuration revision unchanged.",
+        "operationId": "issue_invitation",
+        "parameters": [
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "traffic": {
+                    "default": "entry",
+                    "description": "Traffic capability to assign when the node enrolls.",
+                    "enum": [
+                      "entry",
+                      "relay",
+                      "off"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "title": "InvitationOptions",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedInvitation"
+                }
+              }
+            },
+            "description": "Issue a temporary node enrollment invitation.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Issue a temporary node enrollment invitation."
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "description": "A current administrator bearer token is required on every transport, including the owner socket.",
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://spec.openapis.org/oas/3.1/schema/2025-11-23"
+                }
+              }
+            },
+            "description": "Get the OpenAPI contract for the running server.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Get the OpenAPI contract for the running server."
+      }
+    },
+    "/api/v1/token/rotate": {
+      "post": {
+        "operationId": "rotate_token",
+        "parameters": [
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedToken"
+                }
+              }
+            },
+            "description": "Replace the administrator bearer token and return the new token once.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Replace the administrator bearer token and return the new token once."
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "operationId": "list_users",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Users"
+                }
+              }
+            },
+            "description": "List users and their devices.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List users and their devices."
+      },
+      "post": {
+        "operationId": "create_user",
+        "parameters": [
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "description": "Display name. The server assigns the user's ID and network.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "title": "AddUser",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Create a user and an isolated network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Create a user and an isolated network."
+      }
+    },
+    "/api/v1/users/{user}": {
+      "delete": {
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Remove the user and their network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Remove the user and their network."
+      },
+      "get": {
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "Get one user and their devices.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Get one user and their devices."
+      }
+    },
+    "/api/v1/users/{user}/devices": {
+      "get": {
+        "operationId": "list_devices",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Devices"
+                }
+              }
+            },
+            "description": "List the user's device IDs and metadata.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List the user's device IDs and metadata."
+      },
+      "post": {
+        "operationId": "create_device",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "addresses": {
+                    "default": [],
+                    "description": "Tunnel IP addresses. An empty list requests automatic allocation.",
+                    "items": {
+                      "format": "ip",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "description": {
+                    "description": "Optional description shown in the device's metadata.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "gateway": {
+                    "description": "Preferred entry node ID. Omit to select an eligible node automatically.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "description": "Display name used when provisioning this device.",
+                    "type": "string"
+                  },
+                  "public_key": {
+                    "description": "Base64 WireGuard public key. Omit to have main generate the key pair.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "title": "AddDevice",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Provision a device in the user's network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Provision a device in the user's network."
+      }
+    },
+    "/api/v1/users/{user}/devices/{device}": {
+      "delete": {
+        "operationId": "delete_device",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Remove this device from the user's network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Remove this device from the user's network."
+      },
+      "get": {
+        "operationId": "get_device",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientDevice"
+                }
+              }
+            },
+            "description": "Get the device ID and metadata.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Get the device ID and metadata."
+      }
+    },
+    "/api/v1/users/{user}/devices/{device}/config": {
+      "get": {
+        "operationId": "device_config",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "WireGuard configuration text containing the device private key.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Export a WireGuard profile containing the device's private key.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Export a WireGuard profile containing the device's private key."
+      }
+    },
+    "/api/v1/users/{user}/devices/{device}/config/{network}": {
+      "get": {
+        "operationId": "network_device_config",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The device ID.",
+            "in": "path",
+            "name": "device",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The network ID.",
+            "in": "path",
+            "name": "network",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "description": "WireGuard configuration text containing the device private key.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Export the device's private WireGuard profile for the specified network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Export the device's private WireGuard profile for the specified network."
+      }
+    },
+    "/api/v1/users/{user}/resume": {
+      "post": {
+        "operationId": "resume_user",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Send exactly the two bytes `{}` as the request body.",
+                "title": "EmptyObject",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Resume traffic on the user's network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Resume traffic on the user's network."
+      }
+    },
+    "/api/v1/users/{user}/suspend": {
+      "post": {
+        "operationId": "suspend_user",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Send exactly the two bytes `{}` as the request body.",
+                "title": "EmptyObject",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Suspend traffic on the user's network.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Suspend traffic on the user's network."
+      }
+    }
+  },
+  "security": [
+    {
+      "adminBearer": []
+    }
+  ]
+}

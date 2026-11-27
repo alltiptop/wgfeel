@@ -1,3 +1,4 @@
+use super::models::{InvitationOptions, IssuedInvitation};
 use super::{
     ApiError, ManagementService, Request, Response, change_error, provision, storage_error,
 };
@@ -5,7 +6,7 @@ use std::{
     net::SocketAddr,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use wgfeel_core::{DevicePublicKey, GatewayAssignment, ManagementChange, NodeId, TrafficMode};
+use wgfeel_core::{DevicePublicKey, GatewayAssignment, ManagementChange, NodeId};
 use wgfeel_protocol::enrollment::{ENROLLMENT_PATH, EnrollmentClaim};
 use wgfeel_store::StoredManagement;
 
@@ -13,19 +14,8 @@ impl ManagementService {
     pub(super) fn issue_invitation(
         &mut self,
         state: &StoredManagement,
-        body: &[u8],
-    ) -> Result<Response, ApiError> {
-        #[derive(Default, serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Input {
-            #[serde(default)]
-            traffic: TrafficMode,
-        }
-        let input: Input = if body.is_empty() {
-            Input::default()
-        } else {
-            serde_json::from_slice(body).map_err(|_| ApiError(400, "invalid_invitation_options"))?
-        };
+        input: InvitationOptions,
+    ) -> Result<IssuedInvitation, ApiError> {
         let api = state
             .api()
             .ok_or(ApiError(503, "service_api_unavailable"))?;
@@ -63,22 +53,10 @@ impl ManagementService {
         let uri = invitation
             .encode()
             .map_err(|_| ApiError(500, "encoding_failed"))?;
-        #[derive(serde::Serialize)]
-        struct Issued<'a> {
-            invitation: &'a str,
-            expires_at: u64,
-            traffic: TrafficMode,
-        }
-        Ok(Response {
-            status: 201,
-            generation: Some(state.document().routing().generation()),
-            is_config: false,
-            body: serde_json::to_vec(&Issued {
-                invitation: &uri,
-                expires_at: invitation.expires_at(),
-                traffic: input.traffic,
-            })
-            .map_err(|_| ApiError(500, "encoding_failed"))?,
+        Ok(IssuedInvitation {
+            invitation: uri,
+            expires_at: invitation.expires_at(),
+            traffic: input.traffic,
         })
     }
     /// Public keys for temporary WG peers only. The transport must retire peers

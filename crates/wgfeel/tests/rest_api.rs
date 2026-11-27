@@ -189,6 +189,31 @@ fn external_http_requires_a_token_excludes_internal_rpc_and_changes_port_atomica
         serde_json::from_slice(&server.next_stdout_line(WAIT).unwrap()).unwrap();
     assert_eq!(ready["event"], "ready");
     assert_eq!(exchange(next, Some(token), "/api/v1/users").status, 200);
+    let schema = "/api/v1/openapi.json";
+    assert_eq!(exchange(next, None, schema).status, 401);
+    assert_eq!(
+        exchange(next, Some(&STANDARD.encode([9; 32])), schema).status,
+        401
+    );
+    let response = exchange(next, Some(token), schema);
+    assert_eq!(
+        (response.status, response.generation, response.is_config),
+        (200, Some(1), false)
+    );
+    assert_eq!(
+        response.body.as_slice(),
+        include_bytes!("../../../docs/openapi.json").as_slice()
+    );
+    let document: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(document["openapi"], "3.1.2");
+    assert_eq!(
+        document["security"],
+        serde_json::json!([{"adminBearer":[]}])
+    );
+    assert_eq!(
+        document["components"]["securitySchemes"]["adminBearer"]["scheme"],
+        "bearer"
+    );
     server.terminate().unwrap();
 }
 

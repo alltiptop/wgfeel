@@ -1,4 +1,4 @@
-use super::{AddDevice, ApiError, generated_id, public_key, storage_error};
+use super::{AddDevice, ApiError, generated_id, operations::public_key, storage_error};
 use aws_lc_rs::{
     agreement::{PrivateKey, X25519},
     encoding::{AsBigEndian, Curve25519SeedBin},

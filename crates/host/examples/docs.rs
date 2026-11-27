@@ -1,24 +1,20 @@
 //! Repository documentation generator; no installed services or credentials are used.
 use std::{ffi::OsString, fs, io::Write, path::Path, process::ExitCode};
 
-fn generate(destination: &Path, check: bool) -> Result<bool, String> {
-    let expected = wgfeel_host::help::markdown();
-    write_artifact(destination, &expected, check)
-}
-
 fn write_artifact(destination: &Path, expected: &str, check: bool) -> Result<bool, String> {
     match fs::symlink_metadata(destination) {
         Ok(metadata) if !metadata.is_file() => {
             return Err("documentation destination must be a regular file, not a symlink".into());
         }
         Ok(_) => {
-            let current = fs::read(destination).map_err(|_| "cannot read docs.md")?;
+            let current = fs::read(destination)
+                .map_err(|e| format!("cannot read {}: {e}", destination.display()))?;
             if current == expected.as_bytes() {
                 return Ok(false);
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(_) => return Err("cannot inspect docs.md".into()),
+        Err(e) => return Err(format!("cannot inspect {}: {e}", destination.display())),
     }
     if check {
         return Err(format!(
@@ -40,14 +36,14 @@ fn write_artifact(destination: &Path, expected: &str, check: bool) -> Result<boo
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map_err(|_| "cannot replace docs.md")?;
+    result.map_err(|e| format!("cannot replace {}: {e}", destination.display()))?;
     Ok(true)
 }
 
 fn run(args: &[OsString]) -> Result<(), String> {
     if args == [OsString::from("--help")] || args == [OsString::from("-h")] {
         println!(
-            "Usage: cargo docs [--check]\n\nGenerate docs/docs.md, section-1 manual pages and Bash/Zsh adapters under share/.\n--check reports missing or outdated artifacts without writing files.\nNo services, credentials or network access are required."
+            "Usage: cargo docs [--check]\n\nGenerate docs/docs.md, docs/openapi.json, section-1 manual pages and Bash/Zsh adapters.\n--check reports missing or outdated artifacts without writing files.\nNo services, credentials or network access are required."
         );
         return Ok(());
     }
@@ -57,51 +53,52 @@ fn run(args: &[OsString]) -> Result<(), String> {
         _ => return Err("usage: cargo docs [--check]".into()),
     };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let destination = root.join("docs/docs.md");
-    let changed = generate(&destination, check)?;
-    println!(
-        "docs/docs.md: {}",
-        if changed { "generated" } else { "up to date" }
-    );
-    {
-        for (relative, contents) in wgfeel_host::help::resources() {
-            let destination = root.join("share").join(relative);
-            if !check {
-                let parent = destination.parent().ok_or("invalid generated path")?;
-                let mut current = root.clone();
-                for part in parent
-                    .strip_prefix(&root)
-                    .map_err(|_| "invalid generated path")?
-                    .components()
-                {
-                    current.push(part);
-                    match fs::symlink_metadata(&current) {
-                        Ok(metadata) if metadata.is_dir() => (),
-                        Ok(_) => {
-                            return Err(
-                                "generated directory is not a directory or is a symlink".into()
-                            );
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            fs::create_dir(&current)
-                                .map_err(|_| "cannot create generated directory")?
-                        }
-                        Err(_) => return Err("cannot inspect generated directory".into()),
+    generate(&root, check).map(|_| ())
+}
+
+fn generate(root: &Path, check: bool) -> Result<bool, String> {
+    let docs = [
+        ("docs/docs.md".to_owned(), wgfeel_host::help::markdown()),
+        (
+            "docs/openapi.json".to_owned(),
+            wgfeel_management::render_openapi(),
+        ),
+    ];
+    let resources = wgfeel_host::help::resources()
+        .into_iter()
+        .map(|(path, contents)| (format!("share/{path}"), contents));
+
+    let mut changed_any = false;
+    for (relative, contents) in docs.into_iter().chain(resources) {
+        let destination = root.join(&relative);
+        if !check {
+            let parent = Path::new(&relative)
+                .parent()
+                .ok_or("invalid generated path")?;
+            let mut current = root.to_path_buf();
+            for part in parent.components() {
+                current.push(part);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.is_dir() => (),
+                    Ok(_) => {
+                        return Err("generated directory is not a directory or is a symlink".into());
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        fs::create_dir(&current)
+                            .map_err(|_| "cannot create generated directory")?;
+                    }
+                    Err(_) => return Err("cannot inspect generated directory".into()),
                 }
             }
-            let changed = write_artifact(&destination, &contents, check)?;
-            println!(
-                "{}: {}",
-                destination
-                    .strip_prefix(&root)
-                    .unwrap_or(&destination)
-                    .display(),
-                if changed { "generated" } else { "up to date" }
-            );
         }
+        let changed = write_artifact(&destination, &contents, check)?;
+        changed_any |= changed;
+        println!(
+            "{relative}: {}",
+            if changed { "generated" } else { "up to date" }
+        );
     }
-    Ok(())
+    Ok(changed_any)
 }
 
 fn main() -> ExitCode {
@@ -129,10 +126,11 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
+            fs::create_dir(path.join("docs")).unwrap();
             Self(path)
         }
         fn file(&self) -> std::path::PathBuf {
-            self.0.join("docs.md")
+            self.0.join("docs/docs.md")
         }
     }
     impl Drop for Fixture {
@@ -144,7 +142,7 @@ mod tests {
     #[test]
     fn generation_is_deterministic_and_covers_common_commands() {
         let fixture = Fixture::new();
-        assert!(generate(&fixture.file(), false).unwrap());
+        assert!(generate(&fixture.0, false).unwrap());
         let first = fs::read_to_string(fixture.file()).unwrap();
         for command in [
             "wgfeel user add",
@@ -155,18 +153,18 @@ mod tests {
             assert!(first.contains(command), "missing command: {command}");
         }
         assert!(first.contains("--profile"));
-        assert!(!generate(&fixture.file(), false).unwrap());
-        assert!(!generate(&fixture.file(), true).unwrap());
+        assert!(!generate(&fixture.0, false).unwrap());
+        assert!(!generate(&fixture.0, true).unwrap());
         assert_eq!(first, fs::read_to_string(fixture.file()).unwrap());
     }
 
     #[test]
     fn check_detects_missing_and_stale_files_without_writing() {
         let fixture = Fixture::new();
-        assert!(generate(&fixture.file(), true).is_err());
+        assert!(generate(&fixture.0, true).is_err());
         assert!(!fixture.file().exists());
         fs::write(fixture.file(), "old documentation\n").unwrap();
-        assert!(generate(&fixture.file(), true).is_err());
+        assert!(generate(&fixture.0, true).is_err());
         assert_eq!(
             fs::read_to_string(fixture.file()).unwrap(),
             "old documentation\n"
@@ -179,8 +177,36 @@ mod tests {
         let other = fixture.0.join("other.md");
         fs::write(&other, "keep me").unwrap();
         std::os::unix::fs::symlink(&other, fixture.file()).unwrap();
-        assert!(generate(&fixture.file(), false).is_err());
+        assert!(generate(&fixture.0, false).is_err());
         assert_eq!(fs::read_to_string(other).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn openapi_check_reports_missing_and_stale_schema_without_rewriting_it() {
+        let fixture = Fixture::new();
+        let schema = fixture.0.join("docs/openapi.json");
+        assert!(generate(&fixture.0, false).unwrap());
+        let expected = fs::read(&schema).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+        assert!(document["paths"]["/api/v1/users"]["post"].is_object());
+
+        fs::remove_file(&schema).unwrap();
+        assert!(
+            generate(&fixture.0, true)
+                .unwrap_err()
+                .contains("docs/openapi.json")
+        );
+        assert!(!schema.exists());
+        fs::write(&schema, b"{}").unwrap();
+        assert!(
+            generate(&fixture.0, true)
+                .unwrap_err()
+                .contains("docs/openapi.json")
+        );
+        assert_eq!(fs::read(&schema).unwrap(), b"{}");
+        assert!(generate(&fixture.0, false).unwrap());
+        assert_eq!(fs::read(&schema).unwrap(), expected);
+        assert!(!generate(&fixture.0, true).unwrap());
     }
 
     #[test]

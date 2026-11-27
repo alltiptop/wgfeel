@@ -76,6 +76,15 @@ struct RawPolicy {
     grants: Vec<RawGrant>,
 }
 
+/// Versioned routing and isolation policy shared by the managed networks.
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct WireConfig<'a> {
+    schema_version: u32,
+    generation: u64,
+    networks: &'a [Network],
+    policy: &'a Policy,
+}
+
 impl Config {
     pub fn from_json(input: &str) -> Result<Self, DomainError> {
         if input.len() > MAX_CONFIG_BYTES {
@@ -130,13 +139,6 @@ impl Config {
         Self::new(raw.generation, networks, Policy::new(global, local, grants))
     }
     pub fn to_json(&self) -> Result<String, DomainError> {
-        #[derive(Serialize)]
-        struct WireConfig<'a> {
-            schema_version: u32,
-            generation: u64,
-            networks: &'a [Network],
-            policy: &'a Policy,
-        }
         serde_json::to_string(&WireConfig {
             schema_version: SCHEMA_VERSION,
             generation: self.generation,
