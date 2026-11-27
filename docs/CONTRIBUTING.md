@@ -140,7 +140,7 @@ All development commands can also be run individually:
 | `cargo fmt-check` | Report formatting differences without editing files. |
 | `cargo fmt --all` | Explicitly apply Rust formatting. |
 | `cargo audit-deps` | Check locked dependencies against the local RustSec database. |
-| `cargo docs` | Regenerate `docs/docs.md`, man pages and shell adapters. |
+| `cargo docs` | Regenerate the CLI reference, OpenAPI document, man pages and shell adapters. |
 | `cargo docs --check` | Report missing or outdated generated documentation. |
 | `cargo test --offline --locked --workspace --all-targets` | Run workspace unit and integration tests, including examples. |
 
@@ -195,13 +195,17 @@ cargo docs
 cargo docs --check
 ```
 
-`cargo docs` refreshes `docs/docs.md` and the generated resources in [share](../share/):
-section-1 manuals, Bash adapters and Zsh completion functions. Keep these static
+`cargo docs` also generates the [OpenAPI document](openapi.json) from the REST
+routes and wire types. The server embeds this file and serves it at
+`GET /api/v1/openapi.json` with bearer authentication.
+
+The same command refreshes `docs/docs.md` and the resources in [share](../share/),
+including section-1 manuals, Bash adapters and Zsh completion functions. Keep these static
 files with the code. Files are replaced only when their generated content changes.
 `--check` fails if any artifact is missing or outdated and never writes files.
 Generation is deterministic, uses cached dependencies, and requires no running
 services, credentials or network access. Run these commands when changing
-commands or completion adapters.
+CLI documentation, completion adapters, REST routes or their wire types.
 
 ## Manuals and shell completion
 

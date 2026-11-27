@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 macro_rules! identifier {
     ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
         #[serde(transparent)]
         pub struct $name(String);
         impl $name {
@@ -32,7 +32,7 @@ identifier!(DeviceId);
 identifier!(NodeId);
 
 /// Structurally valid public key; possession is established by WireGuard later.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct DevicePublicKey([u8; 32]);
 impl DevicePublicKey {

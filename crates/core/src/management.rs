@@ -13,8 +13,9 @@ pub const MAX_DEVICE_NAME_BYTES: usize = 128;
 pub const MAX_DEVICE_DESCRIPTION_BYTES: usize = 1024;
 pub const MAX_MANAGEMENT_BYTES: usize = 16_777_216;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct DeviceMetadata {
+    /// Human-readable device name, if configured.
     name: Option<String>,
     description: Option<String>,
 }
@@ -40,7 +41,7 @@ impl DeviceMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ClientDevice {
     id: DeviceId,
     metadata: DeviceMetadata,
@@ -57,7 +58,7 @@ impl ClientDevice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Client {
     id: ClientId,
     name: String,
@@ -128,6 +129,20 @@ pub struct ManagementDocument {
     routing: ManagementConfig,
     clients: Vec<Client>,
 }
+/// Public management configuration returned by the administrative API.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct WireManagement<'a> {
+    /// Management document format version.
+    management_version: u32,
+    /// ID of the authoritative main node.
+    management_id: &'a NodeId,
+    /// Device registrations, networks and routing policy at this revision.
+    #[schemars(with = "crate::wire::WireConfig<'a>")]
+    config: &'a RawValue,
+    assignments: &'a [GatewayAssignment],
+    clients: &'a [Client],
+}
+
 impl ManagementDocument {
     pub fn new(routing: ManagementConfig, clients: Vec<Client>) -> Result<Self, DomainError> {
         if clients.len() > MAX_CLIENTS
@@ -284,14 +299,6 @@ impl ManagementDocument {
         Self::new(routing, clients)
     }
     pub fn to_json(&self) -> Result<String, DomainError> {
-        #[derive(Serialize)]
-        struct WireManagement<'a> {
-            management_version: u32,
-            management_id: &'a NodeId,
-            config: &'a RawValue,
-            assignments: &'a [GatewayAssignment],
-            clients: &'a [Client],
-        }
         let config = self.routing.config().to_json()?;
         if config.len() > crate::MAX_CONFIG_BYTES {
             return Err(DomainError::LimitExceeded);

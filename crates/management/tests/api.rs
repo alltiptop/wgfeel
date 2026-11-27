@@ -76,6 +76,11 @@ fn rotating_token_revokes_old_bearer_durably_without_changing_networks_or_keys()
     let generation = before.document().routing().generation();
     let revision = format!("\"{generation}\"");
     let old = bearer(211);
+    // Requests for the embedded document must go through the current token verifier.
+    assert_eq!(
+        authorized(&mut service, "GET", "/api/v1/openapi.json", None, b"").status,
+        200
+    );
     let response = service.handle(Request {
         method: "POST",
         target: "/api/v1/token/rotate",
@@ -104,18 +109,20 @@ fn rotating_token_revokes_old_bearer_durably_without_changing_networks_or_keys()
             service = fixture.service();
         }
         for (authorization, expected) in [(&old, 401), (&new, 200)] {
-            assert_eq!(
-                service
-                    .handle(Request {
-                        method: "GET",
-                        target: "/api/v1/users",
-                        authorization: Some(authorization),
-                        if_match: None,
-                        body: b"",
-                    })
-                    .status,
-                expected
-            );
+            for target in ["/api/v1/users", "/api/v1/openapi.json"] {
+                assert_eq!(
+                    service
+                        .handle(Request {
+                            method: "GET",
+                            target,
+                            authorization: Some(authorization),
+                            if_match: None,
+                            body: b"",
+                        })
+                        .status,
+                    expected
+                );
+            }
         }
         assert_eq!(
             service
@@ -1167,4 +1174,147 @@ fn malformed_authorization_and_oversized_bodies_are_rejected_before_loading_stat
         413
     );
     assert_eq!(service.handle(request(Some(&valid_format))).status, 503);
+}
+
+#[test]
+fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
+    use serde_json::{Value, json};
+    let fixture = Fixture::new();
+    let mut service = fixture.service();
+    let path = "/api/v1/openapi.json";
+    let snapshot = fixture.bytes();
+    for authorization in [None, Some(&*bearer(19))] {
+        let response = service.handle_local(Request {
+            target: path,
+            method: "GET",
+            authorization,
+            if_match: None,
+            body: b"",
+        });
+        assert_eq!(response.status, 401);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response.body).unwrap(),
+            json!({"error":"unauthorized"})
+        );
+    }
+    let response = authorized(&mut service, "GET", path, None, b"");
+    assert_eq!((response.status, response.generation), (200, Some(7)));
+    let api: Value = serde_json::from_slice(&response.body).unwrap();
+    let paths = api["paths"].as_object().unwrap();
+    let expected = [
+        ("openapi.json", "get"),
+        ("identity", "get"),
+        ("config", "get"),
+        ("distribution", "get"),
+        ("users", "get post"),
+        ("users/{user}", "delete get"),
+        ("users/{user}/suspend", "post"),
+        ("users/{user}/resume", "post"),
+        ("users/{user}/devices", "get post"),
+        ("users/{user}/devices/{device}", "delete get"),
+        ("users/{user}/devices/{device}/config", "get"),
+        ("users/{user}/devices/{device}/config/{network}", "get"),
+        ("gateways", "get post"),
+        ("gateways/{gateway}", "delete get"),
+        ("node-invitations", "post"),
+        ("token/rotate", "post"),
+    ];
+    for (target, methods) in expected {
+        let operations = paths[&format!("/api/v1/{target}")].as_object().unwrap();
+        for method in methods.split_whitespace() {
+            assert!(operations.contains_key(method), "missing {method} {target}");
+        }
+    }
+    for (path, item) in paths {
+        assert!(path.starts_with("/api/v1/"));
+        for operation in item.as_object().unwrap().values() {
+            assert!(!operation["summary"].as_str().unwrap().is_empty());
+            assert!(
+                operation.get("security").is_none(),
+                "must inherit bearer authentication"
+            );
+        }
+    }
+    fn check_local_refs(api: &Value, value: &Value) {
+        match value {
+            Value::Object(object) => {
+                if let Some(pointer) = object
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.strip_prefix('#'))
+                {
+                    assert!(
+                        api.pointer(pointer).is_some(),
+                        "unresolved schema reference {pointer}"
+                    );
+                }
+                for child in object.values() {
+                    check_local_refs(api, child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    check_local_refs(api, item);
+                }
+            }
+            _ => {}
+        }
+    }
+    check_local_refs(&api, &api);
+    assert!(
+        paths[path]["get"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("bearer token")
+    );
+
+    let post = &paths["/api/v1/users"]["post"];
+    let input = &post["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(input["required"], json!(["name"]));
+    assert_eq!(input["additionalProperties"], false);
+    assert_eq!(input["properties"]["name"]["type"], "string");
+    assert!(
+        input["properties"]["name"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Display name")
+    );
+    assert_eq!(post["parameters"][0]["name"], "If-Match");
+    assert_eq!(post["parameters"][0]["required"], true);
+    assert!(post["responses"]["201"]["headers"]["ETag"].is_object());
+    assert!(post["responses"]["412"].is_object());
+    assert!(post["responses"]["428"].is_object());
+    let invitation = &paths["/api/v1/node-invitations"]["post"];
+    assert_eq!(invitation["parameters"][0]["required"], false);
+    assert_eq!(invitation["requestBody"]["required"], false);
+    let traffic = &invitation["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        ["traffic"];
+    assert_eq!(traffic["default"], "entry");
+    assert_eq!(traffic["enum"], json!(["entry", "relay", "off"]));
+    let config = &paths["/api/v1/users/{user}/devices/{device}/config/{network}"]["get"];
+    assert_eq!(
+        config["responses"]["200"]["content"]["text/plain"]["schema"]["type"],
+        "string"
+    );
+    assert_eq!(config["parameters"].as_array().unwrap().len(), 3);
+    let schemas = &api["components"]["schemas"];
+    assert_eq!(
+        schemas["WireManagement"]["properties"]["config"]["$ref"],
+        "#/components/schemas/WireConfig"
+    );
+    assert_eq!(schemas["DevicePublicKey"]["type"], "array");
+    assert_eq!(schemas["DevicePublicKey"]["minItems"], 32);
+    assert!(
+        schemas["DeviceMetadata"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("description"))
+    );
+    assert!(
+        !schemas["Device"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("hostname"))
+    );
+    assert_eq!(fixture.bytes(), snapshot);
 }

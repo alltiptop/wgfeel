@@ -15,13 +15,16 @@ pub fn is_dns_address(address: IpAddr) -> bool {
     address == IpAddr::V4(DNS_IPV4) || address == IpAddr::V6(DNS_IPV6)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Device {
     id: DeviceId,
     public_key: DevicePublicKey,
+    /// Tunnel addresses assigned within this network.
     addresses: Vec<IpAddr>,
+    /// Entry node assigned to the device.
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<NodeId>,
+    /// Stable DNS label within the owner's network.
     #[serde(skip_serializing_if = "Option::is_none")]
     hostname: Option<String>,
 }
@@ -95,7 +98,7 @@ impl Device {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Network {
     id: NetworkId,
     devices: Vec<Device>,
@@ -167,7 +170,7 @@ impl Network {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Endpoint {
     pub(crate) network: NetworkId,
     pub(crate) device: DeviceId,
@@ -183,13 +186,13 @@ impl Endpoint {
         &self.device
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Allow,
     Deny,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Rule {
     source: Endpoint,
     destination: Endpoint,
@@ -207,7 +210,7 @@ impl Rule {
         self.source == *source && self.destination == *destination
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Grant {
     source: Endpoint,
     destination: Endpoint,
@@ -220,7 +223,7 @@ impl Grant {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Policy {
     global_rules: Vec<Rule>,
     local_rules: Vec<Rule>,

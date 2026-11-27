@@ -27,12 +27,20 @@ impl Drop for Response {
     }
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct ErrorBody {
+    /// Machine-readable reason for the failure.
+    pub error: &'static str,
+}
+
 impl Response {
     pub fn error(status: u16, code: &'static str) -> Self {
         Self {
             status,
             generation: None,
-            body: serde_json::json!({"error": code}).to_string().into_bytes(),
+            body: serde_json::json!(ErrorBody { error: code })
+                .to_string()
+                .into_bytes(),
             is_config: false,
         }
     }

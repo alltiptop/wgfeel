@@ -13,6 +13,17 @@ their initial enrollment, key verification and configuration delivery. These
 operations work with the HTTP listener disabled. An administrator may issue an
 invitation through REST, but the child consumes it using WireGuard, never HTTP.
 
+## OpenAPI contract
+
+`GET /api/v1/openapi.json` serves the [OpenAPI 3.1 document](openapi.json)
+embedded in the running binary as `application/json`. Send the same `Authorization: Bearer YOUR_TOKEN`
+header as for other REST reads. Fetching the schema also requires the current
+token over the owner socket. A missing, invalid or revoked token receives `401`.
+
+`cargo docs` generates the file from the HTTP route declarations, Rust wire
+types and their field documentation. Run `cargo docs --check` to verify that
+the file matches the code before building.
+
 ## Configure the listener
 
 Interactive installation asks for the external HTTP port. The default is `9280`,
