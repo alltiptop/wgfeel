@@ -3,9 +3,10 @@ name: Checks
 on:
   push:
     branches: [main]
-    tags: ['v[0-9]*']
   pull_request:
+    branches-ignore: [release, 'release/**']
     types: [opened]
+  workflow_call:
   workflow_dispatch:
   schedule:
     - cron: '23 6 * * 1'
@@ -41,7 +42,7 @@ jobs:
           "$RUNNER_TEMP/wgfeel-check-blobs" --checkout .
 
   checks:
-    name: Build, lint, tests and documentation
+    name: Rust static checks
     needs: source
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -51,10 +52,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install build and shell-test prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends build-essential ca-certificates bash zsh
       - name: Install project toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - name: Fetch locked Linux dependencies
@@ -65,20 +62,6 @@ jobs:
         run: cargo lint
       - name: Check workspace and all targets
         run: cargo check-all
-      - name: Check generated documentation and completion resources
-        run: cargo docs --check
-      - name: Unit tests and existing local integration tests
-        # Workers require only stdin, stdout and stderr. Close inherited runner descriptors.
-        run: |
-          (
-            for path in /proc/self/fd/*; do
-              fd=${path##*/}
-              if (( fd > 2 )); then exec {fd}>&-; fi
-            done
-            exec cargo test --offline --locked --workspace --all-targets
-          )
-      - name: Build common executable
-        run: cargo build --release --offline --locked -p wgfeel --bin wgfeel
 
   audit:
     name: Dependency advisories

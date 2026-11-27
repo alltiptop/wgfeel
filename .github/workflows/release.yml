@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  pull_request:
+    branches: [release, 'release/**']
+    types: [opened, reopened, synchronize, edited]
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    if: github.event.deleted != true
+    uses: ./.github/workflows/checks.yml
+
+  tests:
+    name: Release tests
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build and shell-test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential ca-certificates bash zsh
+      - name: Install project toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Fetch locked Linux dependencies
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Check generated documentation and completion resources
+        run: cargo docs --check
+      - name: Workspace tests and recovery after a 105-second mesh outage
+        # Confined workers must inherit only stdin, stdout and stderr.
+        run: |
+          (
+            for path in /proc/self/fd/*; do
+              fd=${path##*/}
+              if (( fd > 2 )); then exec {fd}>&-; fi
+            done
+            cargo test --offline --locked --workspace --all-targets
+            exec cargo test --offline --locked -p wgfeel --test management_remote -- \
+              --ignored --exact mesh::mesh_reconnects_after_long_outage_without_management
+          )
+
+  build:
+    name: Release build (Linux x86-64)
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install project toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Fetch locked Linux dependencies
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+      - name: Build common executable
+        run: cargo build --release --offline --locked -p wgfeel --bin wgfeel
+      - name: Package tagged binary
+        if: github.event_name == 'push'
+        working-directory: ${{ runner.temp }}
+        run: |
+          tar -C "$GITHUB_WORKSPACE/target/release" -czf wgfeel-linux-x86_64.tar.gz wgfeel
+          sha256sum wgfeel-linux-x86_64.tar.gz > wgfeel-linux-x86_64.tar.gz.sha256
+      - name: Save tagged build as a workflow artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wgfeel-linux-x86_64-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/wgfeel-linux-x86_64.tar.gz
+            ${{ runner.temp }}/wgfeel-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  ready:
+    name: Release ready
+    needs: [checks, tests, build]
+    if: always() && github.event.deleted != true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every release check to pass
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          TESTS: ${{ needs.tests.result }}
+          BUILD: ${{ needs.build.result }}
+        run: '[[ "$CHECKS" == success && "$TESTS" == success && "$BUILD" == success ]]'

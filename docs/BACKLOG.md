@@ -12,8 +12,8 @@
   run with 150 networks and 750 configured devices on an entry limited to 1 GiB.
   Document how to run it, how many devices send traffic, and how to compare
   packet delivery, CPU usage and peak memory across runs.
-- [ ] **Release builds.** Build the Linux x86-64 `wgfeel` executable for each
-  version tag and publish it in a GitHub Release with a checksum and release notes.
+- [ ] **Publish releases.** Publish the Linux x86-64 `wgfeel` binary with a
+  checksum and release notes after the version tag passes release CI.
 - [ ] **External WireGuard gateways per user.** Assign an external WireGuard
   profile to a designated wgfeel node and grant one or more users access to it.
   Their entry nodes forward matching traffic through the mesh to that node,

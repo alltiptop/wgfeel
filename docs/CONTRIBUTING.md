@@ -113,22 +113,28 @@ cargo fmt --all
 cargo docs
 ```
 
-[GitHub CI](../.github/workflows/checks.yml) builds, lints, tests and checks
-documentation when a pull request is opened, on pushes to `main`, and on pushes
-of release tags such as `v0.1.0`. Manual and weekly runs check source files and
-dependency advisories. The first job checks the fresh checkout for forbidden
-artifacts. Build, lint, tests and dependency auditing depend on that job
-succeeding. The checker uses only the Rust standard library. CI compiles it with
-`rustc` into the runner's temporary directory before fetching Cargo dependencies
-or creating project build outputs.
-CI installs prerequisites in disposable runners and refreshes RustSec separately,
-then reports check failures without regenerating tracked files, applying fixes, committing or
-publishing artifacts. The repository token has read-only contents access and is
-not retained by checkout. No Git hooks are used. Checks still create build outputs
-and temporary test fixtures. Ignored native/long-running acceptance tests are not
-enabled by CI. Workspace tests include unit tests and the existing local process
-integration tests. The future container-based functional/load environment is not
-part of this workflow.
+[Ordinary CI](../.github/workflows/checks.yml) runs when a pull request opens
+against an ordinary branch and on pushes to `main`. It checks source files,
+formatting, Clippy, compilation of all workspace targets, and locked dependencies
+against RustSec. Manual and weekly runs check source files and advisories.
+The source checker uses only the Rust standard library and runs on a clean
+checkout before Cargo creates build outputs.
+
+[Release CI](../.github/workflows/release.yml) runs for PRs targeting `release`
+or `release/**` when opened, reopened, edited or updated with new commits. It
+also runs for a pushed version tag such as `v0.1.0`, using the tagged commit.
+After the ordinary checks pass, the test and build jobs run in parallel.
+
+- **Release tests** checks generated documentation and shell completions, runs
+  the workspace unit and integration tests, and explicitly runs the 105-second
+  mesh outage test. Other opt-in tests retain their documented prerequisites.
+- **Release build (Linux x86-64)** builds the optimized `wgfeel` executable.
+  Tag runs save the packaged binary and its SHA-256 checksum as a workflow
+  artifact named for the commit.
+
+The **Release ready** status requires successful static checks, audit, tests
+and build. Select it as a required status check in the GitHub rules for the
+release branches to enforce the result before merging.
 
 All development commands can also be run individually:
 
@@ -278,7 +284,7 @@ Include these project files, including hidden directories:
 | `crates/` | Product code, tests and Rust examples. |
 | `tools/` | Project-owned Rust development tools, including the source artifact checker. |
 | `.cargo/` | Build, lint and offline audit configuration. |
-| `.github/workflows/` | Checks only; no release or deployment workflow. |
+| `.github/workflows/` | Static checks, dependency audit and release validation. |
 | `README.md`, `LICENSE`, `.gitignore`, `docs/` | Entry points, license, guides, generated reference and backlog. |
 | `share/` | Generated man pages and Bash/Zsh completion resources. |
 | `.agents/skills/` | Selected skills with their own licenses, attribution and provenance. |
