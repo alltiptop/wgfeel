@@ -5,7 +5,7 @@ use super::{
     openapi::{self, ApiDocument, Payload, PublicConfig, WireGuardProfile},
     operations::Context,
 };
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use wgfeel_core::ClientDevice;
 use wgfeel_store::StoredManagement;
 
@@ -19,6 +19,8 @@ pub(super) fn is_schema_path(target: &str) -> bool {
 pub(super) enum Kind {
     Read,
     Create,
+    Replace,
+    Placement,
     Delete,
     Suspension,
     Invite,
@@ -29,6 +31,7 @@ impl Kind {
         match self {
             Self::Read => "GET",
             Self::Delete => "DELETE",
+            Self::Replace | Self::Placement => "PUT",
             _ => "POST",
         }
     }
@@ -64,7 +67,7 @@ impl Kind {
         }
     }
 
-    fn decode<T: DeserializeOwned>(self, bytes: &[u8]) -> Result<T, ApiError> {
+    fn decode<'de, T: Deserialize<'de>>(self, bytes: &'de [u8]) -> Result<T, ApiError> {
         if self == Self::Suspension && bytes != b"{}" {
             return Err(ApiError(400, "unexpected_body"));
         }
@@ -130,7 +133,7 @@ macro_rules! routes {
             service: &mut ManagementService, state: &StoredManagement, request: Request<'_>
         ) -> Result<Response, ApiError> {
             let parts = segments(request.target)?;
-            let mut ctx = Context { service, state, revision: state.document().routing().generation() };
+            let mut ctx = Context { service, state, status: None, revision: state.document().routing().generation() };
             match parts.as_slice() {
                 $( [$(segment_pattern!($segment)),+] => {
                     $( let kind = Kind::$kind;
@@ -140,7 +143,7 @@ macro_rules! routes {
                             $($arg,)* $(kind.decode::<$input>(request.body)?)?
                         )?;
                         return Ok(Response {
-                            status: kind.status(),
+                            status: ctx.status.unwrap_or(kind.status()),
                             generation: Some(ctx.revision),
                             is_config: <$output as Payload>::MEDIA_TYPE == "text/plain",
                             body: output.encode()?,
@@ -227,6 +230,38 @@ routes! {
     ["users", {user}, "devices", {device}, "config", {network}] {
         /// Export the device's private WireGuard profile for the specified network.
         Read network_device_config(user, device, network) -> WireGuardProfile, errors(404, 409, 422);
+    }
+    ["egresses"] {
+        /// List external WireGuard profiles saved on main.
+        Read list_egresses() -> Egresses;
+        /// Import an unassigned external WireGuard profile on main.
+        Create create_egress(; AddEgress<'_>) -> ChangeReceipt, errors(409, 422);
+    }
+    ["egresses", {egress}] {
+        /// Read the public metadata of a saved external profile.
+        Read get_egress(egress) -> Egress, errors(404);
+        /// Replace the provider profile while retaining its ID and grants.
+        Replace replace_egress(egress; ReplaceEgress<'_>) -> Egress, errors(404,409,422);
+        /// Delete an unused external profile and its saved keys.
+        Delete delete_egress(egress) -> ChangeReceipt, errors(404,409, 422);
+    }
+    ["egresses",{egress},"node"] {
+        /// Read the current egress placement and any pending handoff.
+        Read get_egress_node(egress) -> EgressNode, errors(404);
+        /// Attach, detach or move an external profile.
+        Placement set_egress_node(egress; SetEgressNode) -> EgressNode, errors(404,409,422);
+    }
+    ["users",{user},"egresses"] {
+        /// List the user's assigned routes and DNS selections.
+        Read get_user_egresses(user) -> AssignmentList, errors(404);
+        /// Replace all of the user's grants in one revision.
+        Replace set_user_egresses(user; GrantSet) -> AssignmentList, errors(404,409,422);
+    }
+    ["users",{user},"egresses",{egress}] {
+        /// Set the user's routes and DNS for one external profile.
+        Replace set_user_egress(user,egress; GrantInput) -> AssignmentView, errors(404,409,422);
+        /// Revoke one grant while preserving the user's other egresses.
+        Delete delete_user_egress(user,egress) -> ChangeReceipt, errors(404,409,422);
     }
     ["gateways"] {
         /// List registered nodes and their public keys.

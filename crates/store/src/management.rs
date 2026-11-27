@@ -5,6 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io,
     net::{IpAddr, SocketAddr},
     path::Path,
@@ -127,26 +128,22 @@ impl StoredManagement {
         &self,
         projection: &wgfeel_core::GatewayProjection,
     ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-        projection
-            .validate_target(
-                self.document.routing().management_id(),
-                projection.recipient(),
-            )
-            .map_err(StoreError::InvalidConfig)?;
-        let mut entries = Vec::with_capacity(projection.assignment().tenants().len());
-        for tenant in projection.assignment().tenants() {
-            if let Some(key) = self
-                .secrets
-                .tenant(projection.recipient(), tenant.network())
-            {
-                entries.push((
-                    tenant.network().clone(),
-                    wgfeel_core::TenantPrivateKey::new(*key.expose_bytes())
-                        .map_err(StoreError::InvalidConfig)?,
-                ));
-            }
+        let routing = self.document.routing();
+        let expected = if let Some(former) = self
+            .retired
+            .iter()
+            .find(|n| n.recipient() == projection.recipient())
+        {
+            routing.withdraw_for(former)
+        } else {
+            routing.project_mesh_for(projection.recipient())
         }
-        GatewayDelivery::encode(projection, &LocalTenants::new(entries)?)
+        .map_err(StoreError::InvalidConfig)?;
+        if &expected != projection {
+            return Err(StoreError::IdentityChanged);
+        }
+        let (tenants, egresses) = delivery_keys(Some(&self.secrets), projection)?;
+        GatewayDelivery::encode(projection, &tenants, &egresses)
     }
     pub fn retired_gateways(&self) -> &[GatewayAssignment] {
         &self.retired
@@ -322,9 +319,9 @@ impl ManagementStore {
             |_| Ok(()),
         )
     }
-    /// Retire a delivery tombstone only after the exact peer confirms applying
-    /// the current withdrawal. This never changes the authoritative document.
-    pub fn confirm_withdrawal(
+    /// Confirm the exact peer applied a projection excluding the reserved keys.
+    /// Publish release, pending ownership and any retired-node removal together.
+    pub fn acknowledge_release(
         &mut self,
         id: &NodeId,
         key: &DevicePublicKey,
@@ -334,13 +331,54 @@ impl ManagementStore {
         if state.document.routing().generation() != generation {
             return Err(StoreError::RevisionConflict);
         }
-        let Some(index) = state.retired.iter().position(|node| node.recipient() == id) else {
-            return Ok(());
-        };
-        if state.retired[index].service_public_key() != key {
+        let retired = state.retired.iter().position(|n| n.recipient() == id);
+        let projection = if let Some(i) = retired {
+            state.document.routing().withdraw_for(&state.retired[i])
+        } else {
+            state.document.routing().project_mesh_for(id)
+        }
+        .map_err(StoreError::InvalidConfig)?;
+        if projection.assignment().service_public_key() != key {
             return Err(StoreError::IdentityChanged);
         }
-        state.retired.remove(index);
+        let reserved = state
+            .document
+            .routing()
+            .egress_policy()
+            .reservations
+            .iter()
+            .filter(|r| &r.former_node == id);
+        let mut release = false;
+        for r in reserved {
+            if &r.former_service_public_key != key
+                || r.removal_generation > generation
+                || projection
+                    .owned_egresses()
+                    .iter()
+                    .any(|p| p.interface_public_key == r.interface_public_key)
+            {
+                return Err(StoreError::IdentityChanged);
+            }
+            release = true;
+        }
+        if !release && retired.is_none() {
+            return Ok(());
+        }
+        if release {
+            state.document = state
+                .document
+                .apply_change(
+                    generation,
+                    &wgfeel_core::ManagementChange::ReleaseEgressKeys {
+                        former: id.clone(),
+                        service_key: key.clone(),
+                    },
+                )
+                .map_err(|_| StoreError::InvalidState)?;
+        }
+        if let Some(i) = retired {
+            state.retired.remove(i);
+        }
         self.write(
             &state.document,
             &state.keys,
@@ -351,6 +389,22 @@ impl ManagementStore {
             state.managed.then_some(&state.secrets),
             |_| Ok(()),
         )
+    }
+    pub fn confirm_withdrawal(
+        &mut self,
+        id: &NodeId,
+        key: &DevicePublicKey,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        let state = self.load()?.ok_or(StoreError::InvalidState)?;
+        if state.document.routing().generation() != generation {
+            return Err(StoreError::RevisionConflict);
+        }
+        if state.retired.iter().any(|n| n.recipient() == id) {
+            self.acknowledge_release(id, key, generation)
+        } else {
+            Ok(())
+        }
     }
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Ok(Self {
@@ -376,7 +430,7 @@ impl ManagementStore {
     fn decode(bytes: &[u8]) -> Result<StoredManagement, StoreError> {
         let stored: ReadManagement<'_> =
             serde_json::from_slice(bytes).map_err(|_| StoreError::InvalidState)?;
-        if stored.management_storage_version != 6 {
+        if !matches!(stored.management_storage_version, 6 | 7) {
             return Err(StoreError::InvalidState);
         }
         let managed = stored.secrets.is_some();
@@ -425,6 +479,13 @@ impl ManagementStore {
                 .map_err(|_| StoreError::InvalidState)?,
         )
         .map_err(|_| StoreError::InvalidState)?;
+        if stored.management_storage_version == 6
+            && document.routing().egress_policy() != &wgfeel_core::EgressPolicy::default()
+        {
+            return Err(StoreError::InvalidState);
+        }
+        validate_egress_node_keys(&document, &keys, api.as_ref(), &retired)
+            .map_err(|_| StoreError::InvalidState)?;
         secrets.validate(&document)?;
         Ok(StoredManagement {
             document,
@@ -591,6 +652,9 @@ impl ManagementStore {
         if let Some(secrets) = secrets {
             secrets.validate(document)?;
         }
+        if secrets.is_none() && !document.routing().egresses().is_empty() {
+            return Err(StoreError::InvalidState);
+        }
         let mut retired = previous
             .as_ref()
             .map(|state| state.retired.clone())
@@ -612,6 +676,7 @@ impl ManagementStore {
                 }
             }
         }
+        validate_egress_node_keys(document, key, api, &retired)?;
         for node in &retired {
             if document.routing().assignments().iter().any(|current| {
                 current.recipient() == node.recipient()
@@ -637,21 +702,6 @@ impl ManagementStore {
         if retired.len() > MAX_GATEWAYS {
             return Err(StoreError::InvalidState);
         }
-        // Reject a globally valid but undeliverable revision before publishing.
-        for node in document.routing().assignments() {
-            document
-                .routing()
-                .project_mesh_for(node.recipient())
-                .and_then(|projection| projection.to_json())
-                .map_err(StoreError::InvalidConfig)?;
-        }
-        for node in &retired {
-            document
-                .routing()
-                .withdraw_for(node)
-                .and_then(|projection| projection.to_json())
-                .map_err(StoreError::InvalidConfig)?;
-        }
         self.write(
             document, key, credential, api, rest_api, &retired, secrets, checkpoint,
         )
@@ -668,11 +718,13 @@ impl ManagementStore {
         secrets: Option<&ManagementSecrets>,
         checkpoint: impl FnMut(CommitStage) -> io::Result<()>,
     ) -> Result<(), StoreError> {
+        check_deliveries(document, retired, secrets)?;
+        check_pending_deliveries(document, retired, secrets)?;
         let document =
             RawValue::from_string(document.to_json().map_err(StoreError::InvalidConfig)?)
                 .map_err(|_| StoreError::InvalidState)?;
         let envelope = WriteManagement {
-            management_storage_version: 6,
+            management_storage_version: 7,
             document: &document,
             service_private_key: key.service().expose_bytes(),
             gateway_private_key: key.gateway().expose_bytes(),
@@ -691,8 +743,241 @@ impl ManagementStore {
             }
         ]);
         let mut writer = io::Cursor::new(bytes.as_mut_slice());
-        serde_json::to_writer(&mut writer, &envelope).map_err(|_| StoreError::InvalidState)?;
+        serde_json::to_writer(&mut writer, &envelope)
+            .map_err(|_| StoreError::InvalidConfig(wgfeel_core::DomainError::LimitExceeded))?;
         let written = writer.position() as usize;
         self.directory.publish(&bytes[..written], checkpoint)
     }
+}
+
+fn check_deliveries(
+    document: &ManagementDocument,
+    retired: &[GatewayAssignment],
+    secrets: Option<&ManagementSecrets>,
+) -> Result<(), StoreError> {
+    let routing = document.routing();
+    for projection in routing
+        .assignments()
+        .iter()
+        .map(|node| routing.project_mesh_for(node.recipient()))
+        .chain(retired.iter().map(|former| routing.withdraw_for(former)))
+    {
+        let projection = projection.map_err(StoreError::InvalidConfig)?;
+        let (tenants, egresses) = delivery_keys(secrets, &projection)?;
+        GatewayDelivery::check_size(&projection, &tenants, &egresses)?;
+    }
+    Ok(())
+}
+
+type Release<'a> = (&'a NodeId, &'a DevicePublicKey);
+
+/// Size hypothetical releases without making their projections deliverable.
+fn check_pending_deliveries(
+    document: &ManagementDocument,
+    retired: &[GatewayAssignment],
+    secrets: Option<&ManagementSecrets>,
+) -> Result<(), StoreError> {
+    let routing = document.routing();
+    let policy = routing.egress_policy();
+    if !policy.profiles.iter().any(|p| p.pending_node.is_some()) {
+        return Ok(());
+    }
+
+    // Release is atomic per authenticated former owner. Include release-only
+    // reservations as well: their ACK can increase the revision's JSON width.
+    let mut groups: BTreeMap<Release<'_>, Vec<(&wgfeel_core::EgressId, &NodeId)>> = BTreeMap::new();
+    for reservation in &policy.reservations {
+        let group = groups
+            .entry((
+                &reservation.former_node,
+                &reservation.former_service_public_key,
+            ))
+            .or_default();
+        if let Some((profile, destination)) = policy
+            .profiles
+            .iter()
+            .find(|p| p.interface_public_key == reservation.interface_public_key)
+            .and_then(|p| p.pending_node.as_ref().map(|n| (p, n)))
+        {
+            group.push((&profile.id, destination));
+        }
+    }
+    let all: Vec<_> = groups.keys().copied().collect();
+    check_deliveries(&simulate_releases(document, &all)?, retired, secrets)?;
+
+    // A one-character node ID makes a public route descriptor one byte shorter
+    // ("x" replaces null). Some ACK orders can then be larger than the final
+    // state. For each recipient, release all groups with nonnegative growth.
+    if groups.len() == 1
+        || !groups
+            .values()
+            .flatten()
+            .any(|(_, node)| node.as_str().len() == 1)
+    {
+        return Ok(());
+    }
+    let mut views: BTreeMap<Vec<Release<'_>>, Vec<&NodeId>> = BTreeMap::new();
+    for node in routing.assignments() {
+        let used: BTreeSet<_> = policy
+            .users
+            .iter()
+            .filter(|u| node.networks().contains(&u.network))
+            .flat_map(|u| u.egresses.iter().map(|g| &g.egress_id))
+            .collect();
+        let largest: Vec<_> = groups
+            .iter()
+            .filter(|(_, moves)| {
+                // One owned profile outweighs the possible single-byte reductions
+                // from other profiles (at most MAX_EGRESSES in total).
+                moves.iter().any(|(_, target)| *target == node.recipient())
+                    || moves
+                        .iter()
+                        .filter(|(id, _)| used.contains(id))
+                        .map(|(_, target)| target.as_str().len() as isize - 2)
+                        .sum::<isize>()
+                        >= 0
+            })
+            .map(|(&release, _)| release)
+            .collect();
+        if !largest.is_empty() && largest.len() != all.len() {
+            views.entry(largest).or_default().push(node.recipient());
+        }
+    }
+    for (releases, recipients) in views {
+        let future = simulate_releases(document, &releases)?;
+        for node in recipients {
+            let projection = future
+                .routing()
+                .project_mesh_for(node)
+                .map_err(StoreError::InvalidConfig)?;
+            let (tenants, egresses) = delivery_keys(secrets, &projection)?;
+            GatewayDelivery::check_size(&projection, &tenants, &egresses)?;
+        }
+    }
+    Ok(())
+}
+
+/// Use the domain operation itself so the public ownership, selected private
+/// keys and encoded revision agree with actual authenticated ACKs.
+fn simulate_releases(
+    document: &ManagementDocument,
+    releases: &[Release<'_>],
+) -> Result<ManagementDocument, StoreError> {
+    use wgfeel_core::{DomainError, ManagementChange, ManagementChangeError};
+    let mut promoted: Option<ManagementDocument> = None;
+    for &(former, key) in releases {
+        let previous = promoted.as_ref().unwrap_or(document);
+        promoted = Some(
+            previous
+                .apply_change(
+                    previous.routing().generation(),
+                    &ManagementChange::ReleaseEgressKeys {
+                        former: former.clone(),
+                        service_key: key.clone(),
+                    },
+                )
+                .map_err(|err| match err {
+                    ManagementChangeError::Invalid(reason) => StoreError::InvalidConfig(reason),
+                    ManagementChangeError::GenerationExhausted => {
+                        StoreError::InvalidConfig(DomainError::InvalidGeneration)
+                    }
+                    _ => StoreError::InvalidState,
+                })?,
+        );
+    }
+    promoted.ok_or(StoreError::InvalidState)
+}
+
+fn validate_egress_node_keys(
+    document: &ManagementDocument,
+    keys: &NodeKeys,
+    api: Option<&ManagementApi>,
+    retired: &[GatewayAssignment],
+) -> Result<(), StoreError> {
+    use aws_lc_rs::agreement::{PrivateKey, X25519};
+    let profiles = document.routing().egresses();
+    let reservations = &document.routing().egress_policy().reservations;
+    if profiles.is_empty() && reservations.is_empty() {
+        return Ok(());
+    }
+    let public = |key: &[u8; 32]| {
+        PrivateKey::from_private_key(&X25519, key)
+            .map_err(|_| StoreError::InvalidState)?
+            .compute_public_key()
+            .map_err(|_| StoreError::InvalidState)
+    };
+    let service = public(keys.service().expose_bytes())?;
+    let gateway = public(keys.gateway().expose_bytes())?;
+    for r in reservations {
+        if !document
+            .routing()
+            .assignments()
+            .iter()
+            .chain(retired)
+            .any(|node| {
+                node.recipient() == &r.former_node
+                    && node.service_public_key() == &r.former_service_public_key
+            })
+        {
+            return Err(StoreError::InvalidState);
+        }
+        let reserved = r.interface_public_key.as_bytes();
+        if reserved == service.as_ref()
+            || reserved == gateway.as_ref()
+            || api.is_some_and(|api| &api.admin_public_key().x25519_coordinate() == reserved)
+            || retired
+                .iter()
+                .flat_map(GatewayAssignment::transport_public_keys)
+                .any(|k| &k.x25519_coordinate() == reserved)
+        {
+            return Err(StoreError::InvalidConfig(
+                wgfeel_core::DomainError::EgressKeyPendingWithdrawal,
+            ));
+        }
+    }
+    for profile in profiles {
+        for key in [&profile.interface_public_key, &profile.peer_public_key] {
+            if retired
+                .iter()
+                .flat_map(GatewayAssignment::transport_public_keys)
+                .any(|old| &old.x25519_coordinate() == key.as_bytes())
+            {
+                return Err(StoreError::WithdrawalPending);
+            }
+            if key.as_bytes() == service.as_ref()
+                || key.as_bytes() == gateway.as_ref()
+                || api.is_some_and(|api| {
+                    &api.admin_public_key().x25519_coordinate() == key.as_bytes()
+                })
+            {
+                return Err(StoreError::InvalidConfig(
+                    wgfeel_core::DomainError::InvalidEgress,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn delivery_keys(
+    secrets: Option<&ManagementSecrets>,
+    projection: &wgfeel_core::GatewayProjection,
+) -> Result<(LocalTenants, crate::LocalEgressSecrets), StoreError> {
+    let mut entries = Vec::with_capacity(projection.assignment().tenants().len());
+    for tenant in projection.assignment().tenants() {
+        if let Some(key) = secrets.and_then(|s| s.tenant(projection.recipient(), tenant.network()))
+        {
+            entries.push((
+                tenant.network().clone(),
+                wgfeel_core::TenantPrivateKey::new(*key.expose_bytes())
+                    .map_err(StoreError::InvalidConfig)?,
+            ));
+        }
+    }
+    let egresses = secrets
+        .map(|s| s.select_egress_keys(projection))
+        .transpose()?
+        .unwrap_or_default();
+    egresses.validate(projection)?;
+    Ok((LocalTenants::new(entries)?, egresses))
 }

@@ -7,6 +7,9 @@ pub enum Entity {
     Users,
     Devices,
     Nodes,
+    EntryNodes,
+    Egresses,
+    UserList,
 }
 
 pub struct Candidate {
@@ -151,9 +154,11 @@ pub fn request(raw: &[OsString]) -> Completion {
             "--state-dir" | "--install-dir" | "--root" => {
                 result.candidates.push(Candidate::new("@directories", ""))
             }
-            "--profile" | "--socket" | "--credential-file" => {
+            "--profile" | "--socket" | "--credential-file" | "--config-file" => {
                 result.candidates.push(Candidate::new("@files", ""))
             }
+            "--users" => result.entity = Some(Entity::UserList),
+            "--node" => result.entity = Some(Entity::EntryNodes),
             "--user" => result.entity = Some(Entity::Users),
             "--id" if path == "user remove" => result.entity = Some(Entity::Users),
             _ => (),
@@ -161,11 +166,22 @@ pub fn request(raw: &[OsString]) -> Completion {
     } else {
         if positional == 0 && !prefix.starts_with('-') {
             result.entity = match path.as_str() {
-                "user show" => Some(Entity::Users),
+                "egress node" | "egress replace" | "egress show" | "egress delete" => {
+                    Some(Entity::Egresses)
+                }
+                "user egress list" | "user egress set" | "user egress remove" | "user show" => {
+                    Some(Entity::Users)
+                }
                 "device show" | "device delete" => Some(Entity::Devices),
                 "node show" | "node delete" => Some(Entity::Nodes),
                 _ => None,
             };
+            if path == "egress add"
+                && !used.contains_key("--config-file")
+                && !used.contains_key("--config-stdin")
+            {
+                result.candidates.push(Candidate::new("@files", ""));
+            }
             if path == "completions" {
                 for shell in ["bash", "zsh"] {
                     result.candidates.push(Candidate::new(shell, ""));
@@ -187,6 +203,18 @@ pub fn request(raw: &[OsString]) -> Completion {
                             .unwrap_or(command.description),
                     ));
                 }
+            }
+        }
+        if positional == 1 && !prefix.starts_with('-') {
+            match path.as_str() {
+                "user egress set" | "user egress remove" => result.entity = Some(Entity::Egresses),
+                "egress replace"
+                    if !used.contains_key("--config-file")
+                        && !used.contains_key("--config-stdin") =>
+                {
+                    result.candidates.push(Candidate::new("@files", ""))
+                }
+                _ => (),
             }
         }
         if prefix.is_empty() || prefix.starts_with('-') {

@@ -364,3 +364,55 @@ fn framed_read_rejects_oversize_before_payload_read_and_all_truncated_frames() {
         maximum
     );
 }
+
+#[test]
+fn external_bootstrap_requires_one_provider_and_keeps_psk_inside_its_context() {
+    let external = ContextId::External(wgfeel_core::EgressId::new("vpn").unwrap());
+    let mut body = vec![1, 2];
+    body.extend_from_slice(&[91; 32]);
+    body.extend_from_slice(&10_u32.to_le_bytes());
+    body.extend_from_slice(&1_u16.to_le_bytes());
+    body.extend_from_slice(b"\x08provider");
+    body.extend_from_slice(&[17; 32]);
+    body.extend_from_slice(&25_u16.to_le_bytes());
+    body.push(1);
+    body.extend_from_slice(&[83; 32]);
+    let (config, limits) = decode_bootstrap(&body, &external).unwrap();
+    assert_eq!(config.peers.len(), 1);
+    assert_eq!(config.peers[0].id, PeerId::Provider);
+    assert_eq!(*encode_bootstrap(&config, limits).unwrap(), framed(&body));
+    for end in 0..body.len() {
+        assert!(decode_bootstrap(&body[..end], &external).is_err());
+    }
+    assert!(decode_bootstrap(&body, &ContextId::Service).is_err());
+    assert!(decode_bootstrap(&bootstrap(0), &external).is_err());
+}
+
+#[test]
+fn oversized_provider_input_can_reach_pmtu_without_widening_public_workers_or_output() {
+    for n in [1313, 1504, crate::MAX_PROVIDER_DATAGRAM_SIZE] {
+        let mut body = vec![1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
+        body.extend_from_slice(&(n as u16).to_le_bytes());
+        body.resize(15 + n, 0);
+        assert!(decode_request(&body).is_err());
+        let req = super::decode_request_scoped(true, &body).unwrap();
+        assert_eq!(
+            super::encode_request_scoped(true, &req).unwrap(),
+            framed(&body)
+        );
+        body[10] = 3;
+        assert!(
+            super::decode_request_scoped(true, &body).is_err(),
+            "provider sends still obey the inner MTU"
+        );
+    }
+    let mut body = vec![1, 4, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0];
+    body.extend_from_slice(&1480_u16.to_le_bytes());
+    body.resize(19 + 1480, 0);
+    let reply = super::decode_reply_scoped(true, &body).unwrap();
+    assert_eq!(
+        super::encode_reply_scoped(true, &reply).unwrap(),
+        framed(&body)
+    );
+    assert!(decode_reply(&body).is_err());
+}

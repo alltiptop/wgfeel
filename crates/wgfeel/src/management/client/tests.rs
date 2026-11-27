@@ -143,6 +143,7 @@ impl Installation {
             &self.path,
             &mut io::Cursor::new(input),
             &mut out,
+            true,
         )?;
         Ok(String::from_utf8(out).unwrap())
     }
@@ -339,4 +340,77 @@ fn connection_options_and_private_socket_boundaries_remain_enforced() {
     fs::remove_file(socket).unwrap();
     assert!(installation.ui(&["user", "list"], "").is_err());
     assert_eq!(fs::read(state).unwrap(), before);
+}
+
+#[test]
+fn installed_egress_commands_roundtrip_real_placement_and_grants() {
+    let install = Installation::new();
+    install.gateway();
+    install
+        .ui(&["user", "add", "Alice"], "laptop\n0\n")
+        .unwrap();
+    let users = install.users();
+    let alice = users["users"][0]["id"].as_str().unwrap();
+    let source = format!(
+        "[Interface]\nAddress = 172.16.0.42/24\nPrivateKey = {}\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\nEndpoint = VPN.Example.net.:51820\n",
+        STANDARD.encode([41; 32]),
+        STANDARD.encode([42; 32])
+    );
+    let receipt = install
+        .ui(
+            &[
+                "egress",
+                "add",
+                "--config-stdin",
+                "--node",
+                "edge",
+                "--users",
+                alice,
+                "--routes",
+                "10.40.0.0/16",
+            ],
+            &source,
+        )
+        .unwrap();
+    assert!(receipt.contains("Re-export and re-import"));
+    let users = install.users();
+    let id = users["users"][0]["egresses"][0]["egress_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        users["users"][0]["egresses"][0]["routes"],
+        serde_json::json!(["10.40.0.0/16"])
+    );
+    let list = install.ui(&["user", "egress", "list", alice], "").unwrap();
+    assert!(
+        list.contains("vpn.example.net") && list.contains("10.40.0.0/16") && list.contains("edge")
+    );
+    install
+        .ui(
+            &[
+                "user",
+                "egress",
+                "set",
+                alice,
+                id,
+                "--internet",
+                "--non-interactive",
+            ],
+            "",
+        )
+        .unwrap();
+    let user_menu = install.ui(&["user", "show", alice], "0\n").unwrap();
+    assert!(user_menu.contains("5. egresses") && user_menu.contains("0.0.0.0/0"));
+    let before = install.users();
+    install
+        .ui(&["user", "egress", "remove", alice, id], "\n")
+        .unwrap();
+    assert_eq!(install.users(), before);
+    install
+        .ui(&["user", "egress", "remove", alice, id], "y\n")
+        .unwrap();
+    assert_eq!(
+        install.users()["users"][0]["egresses"],
+        serde_json::json!([])
+    );
 }

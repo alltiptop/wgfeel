@@ -129,7 +129,7 @@ wgfeel user add Alice
 ```
 
 1. Name the first device `Phone` when prompted. `user add` then opens Alice's
-   menu (`1. add device`, `2. remove user`, `3. suspend user`, `4. show devices`).
+   menu (`1. add device`, `2. remove user`, `3. suspend user`, `4. show devices`, `5. egresses`).
 2. Select `4` (`show devices`), then `1` (`Phone`) to display its WireGuard
    configuration. Import it privately into the phone's WireGuard client.
 3. Add a second device named `Laptop`—either by choosing `1` (`add device`) in
@@ -138,6 +138,36 @@ wgfeel user add Alice
 
 Never reuse one device's configuration on another device. Use
 `wgfeel device show` at any time to reopen a device's details and configuration.
+
+### Route a user through an external WireGuard provider
+
+On `main`, run `wgfeel egress add office.conf` in a terminal. Accept the
+endpoint hostname as the profile name or enter a friendly name. Choose an
+`entry` node and the users to grant access. Enter the external CIDRs and
+optional DNS zones. Choosing node `0` saves an unassigned profile on `main`.
+The provider config contains private keys. Supply the file path or pipe the
+file through standard input.
+
+For a script that stores the profile first, run
+
+```sh
+wgfeel egress add --config-stdin < office.conf
+wgfeel egress list
+```
+
+Use the generated IDs from the egress, user and node lists in these commands.
+
+```sh
+wgfeel egress node EGRESS_ID --node NODE_ID
+wgfeel user egress set USER_ID EGRESS_ID --routes 10.40.0.0/16
+wgfeel user egress list USER_ID
+```
+
+For an internet exit, use `--internet`. This grants the default route only
+in IP families supported by both the profile addresses and provider
+`AllowedIPs`. Add `--dns-default` to select the provider's eligible resolvers,
+or use `--dns-zones corp.example,lab.example` for split DNS. Re-export and
+re-import the affected device profiles after changing routes or DNS.
 
 ### Export format and endpoints
 
@@ -175,7 +205,7 @@ Verify with `resolvectl query <device>.feel.internal` and
 `resolvectl query example.org`. Use `resolvectl revert <interface>` to clear
 the settings if the interface stays up.
 
-Only private user prefixes route through the tunnel (no Internet exit), and
+By default only private user prefixes route through the tunnel, and
 different users are isolated from one another. Children keep their last applied
 configuration during a `main` outage. Mesh failover repairs paths between
 nodes, but does not move a device off a failed home `entry`—changing a

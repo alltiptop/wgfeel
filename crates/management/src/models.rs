@@ -142,6 +142,7 @@ pub(super) struct Users<'a> {
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct User<'a> {
+    pub egresses: Vec<AssignmentView>,
     pub id: &'a ClientId,
     pub name: &'a str,
     /// Whether traffic for this user's network is suspended.
@@ -159,6 +160,7 @@ pub(super) struct Gateways<'a> {
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct Gateway<'a> {
+    pub traffic: TrafficMode,
     /// ID of the node receiving configuration.
     pub recipient: &'a NodeId,
     pub service_public_key: &'a DevicePublicKey,
@@ -182,3 +184,106 @@ pub(super) struct GatewayTenant<'a> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyObject {}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AddEgress<'a> {
+    /// WireGuard profile contents. Write only.
+    #[schemars(with = "String", extend("writeOnly" = true))]
+    #[serde(borrow)]
+    pub config: &'a serde_json::value::RawValue,
+    /// Display name. Defaults to the provider endpoint host.
+    pub name: Option<String>,
+    /// Optional entry node that will receive the provider key.
+    pub node: Option<NodeId>,
+    /// User grants to create in the same transaction. Grants require placement.
+    #[serde(default)]
+    pub users: Vec<InitialGrant>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PlacementState {
+    Unassigned,
+    Placed,
+    Detaching,
+    Moving,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(super) struct Egress {
+    pub id: wgfeel_core::EgressId,
+    pub name: String,
+    pub node: Option<NodeId>,
+    pub pending_node: Option<NodeId>,
+    pub placement_state: PlacementState,
+    pub interface_public_key: String,
+    pub addresses: Vec<IpAddr>,
+    pub dns_servers: Vec<IpAddr>,
+    pub mtu: Option<u16>,
+    pub peer_public_key: String,
+    pub endpoint: wgfeel_core::EgressEndpoint,
+    pub allowed_ips: Vec<wgfeel_core::IpPrefix>,
+    pub persistent_keepalive: Option<std::num::NonZeroU16>,
+    pub has_preshared_key: bool,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct Egresses {
+    pub egresses: Vec<Egress>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InitialGrant {
+    pub user: ClientId,
+    pub routes: Vec<wgfeel_core::IpPrefix>,
+    pub dns: wgfeel_core::EgressDnsSelection,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GrantInput {
+    pub routes: Vec<wgfeel_core::IpPrefix>,
+    pub dns: wgfeel_core::EgressDnsSelection,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GrantSet {
+    pub egresses: Vec<wgfeel_core::UserEgressAssignment>,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct AssignmentView {
+    #[serde(flatten)]
+    pub grant: wgfeel_core::UserEgressAssignment,
+    pub dormant: bool,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct AssignmentList {
+    pub egresses: Vec<AssignmentView>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplaceEgress<'a> {
+    #[schemars(with="String",extend("writeOnly"=true))]
+    #[serde(borrow)]
+    pub config: &'a serde_json::value::RawValue,
+    pub name: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SetEgressNode {
+    #[serde(deserialize_with = "required_node")]
+    #[schemars(required)]
+    pub node: Option<NodeId>,
+}
+fn required_node<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<NodeId>, D::Error> {
+    Option::deserialize(de)
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct EgressNode {
+    pub egress_id: wgfeel_core::EgressId,
+    pub node: Option<NodeId>,
+    pub pending_node: Option<NodeId>,
+    pub placement_state: PlacementState,
+    pub former_node: Option<NodeId>,
+    pub withdrawal_generation: Option<u64>,
+}

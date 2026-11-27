@@ -336,8 +336,8 @@ fn complete_document_and_own_secrets_survive_a_fresh_process_without_public_leak
     assert_snapshot(&loaded, &old(), false);
     let bytes = fs::read(directory.state().join("state.json")).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["management_storage_version"], 6);
-    assert_eq!(json["document"]["management_version"], 1);
+    assert_eq!(json["management_storage_version"], 7);
+    assert_eq!(json["document"]["management_version"], 2);
     assert_eq!(json["document"]["management_id"], "management");
     assert_eq!(json.as_object().unwrap().len(), 5);
     assert!(json["service_private_key"] == serde_json::to_value([211; 32]).unwrap());

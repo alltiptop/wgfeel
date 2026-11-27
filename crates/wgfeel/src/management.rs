@@ -15,7 +15,7 @@ mod transport;
 pub(super) fn is_client(args: &[OsString]) -> bool {
     matches!(
         args.first().and_then(|arg| arg.to_str()),
-        Some("user" | "device" | "config" | "node" | "token")
+        Some("egress" | "user" | "device" | "config" | "node" | "token")
     )
 }
 

@@ -6,12 +6,71 @@ use crate::{
     WireGuardError,
     forwarding::{authorize_dns, authorize_routed},
     gateway::local_contexts,
-    mesh::Traffic,
+    mesh::{Direction, ExternalTraffic, MeshTraffic},
+    nat::{NatAction, NatBinding, NatTable},
 };
-use std::{fmt, net::SocketAddr, os::fd::BorrowedFd, time::Duration};
+use std::{
+    fmt,
+    net::SocketAddr,
+    os::fd::BorrowedFd,
+    time::{Duration, Instant},
+};
 use wgfeel_core::{
-    DevicePublicKey, GatewayProjection, NetworkId, NodeId, NodeKeys, TenantPrivateKey,
+    Destination, DevicePublicKey, EgressId, EgressPrivateKey, EgressProfile, Endpoint,
+    GatewayProjection, NetworkId, NodeId, NodeKeys, PresharedKey, TenantPrivateKey,
 };
+
+pub fn same_provider_session(a: &EgressProfile, b: &EgressProfile) -> bool {
+    a.id == b.id
+        && a.node == b.node
+        && a.secret_revision == b.secret_revision
+        && a.interface_public_key == b.interface_public_key
+        && a.peer_public_key == b.peer_public_key
+        && a.has_preshared_key == b.has_preshared_key
+        && a.endpoint == b.endpoint
+        && a.persistent_keepalive == b.persistent_keepalive
+        && a.addresses == b.addresses
+        && a.allowed_ips == b.allowed_ips
+        && a.mtu == b.mtu
+}
+type ProviderKeys<'a> = (&'a EgressId, &'a EgressPrivateKey, Option<&'a PresharedKey>);
+
+// Compare opaque key material across retries without retaining a second secret.
+struct KeyFingerprint(aws_lc_rs::digest::Digest);
+impl KeyFingerprint {
+    fn new(private: &EgressPrivateKey, psk: Option<&PresharedKey>) -> Self {
+        let mut input = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+        input.update(private.expose_bytes());
+        if let Some(key) = psk {
+            input.update(key.expose_bytes())
+        }
+        Self(input.finish())
+    }
+}
+impl fmt::Debug for KeyFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+const PMTU_LEASE: Duration = Duration::from_secs(600);
+
+#[derive(Debug, Default)]
+struct PathMtu(std::collections::BTreeMap<EgressId, (u16, Instant)>);
+impl PathMtu {
+    fn record(&mut self, id: &EgressId, mtu: u16, now: Instant) {
+        self.0.insert(id.clone(), (mtu, now + PMTU_LEASE));
+    }
+    fn get(&self, id: &EgressId, now: Instant) -> u16 {
+        self.0
+            .get(id)
+            .filter(|(_, expires)| *expires > now)
+            .map_or(crate::MAX_PLAINTEXT_SIZE as u16, |(mtu, _)| *mtu)
+    }
+    fn clear(&mut self, id: &EgressId) {
+        self.0.remove(id);
+    }
+}
 
 /// Encrypted output for the caller's existing UDP socket. Debug omits bytes.
 #[derive(Debug)]
@@ -59,7 +118,7 @@ pub enum LocalEvent {
         network: NetworkId,
         peer: NodeId,
         packet: PacketBytes,
-        traffic: Option<Traffic>,
+        traffic: Option<MeshTraffic>,
     },
     /// Authenticated system traffic from the pinned Management peer only.
     Management {
@@ -85,6 +144,7 @@ pub enum LocalEvent {
         generation: u64,
     },
     Network(EncryptedDatagram),
+    ProviderOutput(EncryptedDatagram),
     /// Forwarding rejections identify the original authenticated source,
     /// including when the destination cannot encrypt or the source was retired.
     Dropped {
@@ -119,21 +179,24 @@ impl DnsSource {
     pub fn network(&self) -> &NetworkId {
         match &self.origin.context {
             ContextId::Tenant(id) => id,
-            ContextId::Service | ContextId::Gateway => unreachable!("tenant DNS only"),
+            ContextId::External(_) | ContextId::Service | ContextId::Gateway => {
+                unreachable!("tenant DNS only")
+            }
         }
     }
 }
 #[derive(Debug)]
 enum Stage {
     Receive,
+    ProviderReceive,
     ReceiveMesh {
         network: NetworkId,
         origin: NodeId,
-        traffic: Option<Traffic>,
+        traffic: Option<MeshTraffic>,
     },
     Control(PeerId),
     Timer(PeerId),
-    Forward(Origin, Option<Traffic>),
+    Forward(Origin, Option<MeshTraffic>),
     Cancelled(ContextId, Option<PeerId>),
     ConfigureEnrollment(Option<NodeId>),
     ConfigureControl(Vec<crate::PeerConfig>),
@@ -149,6 +212,12 @@ impl Stage {
     /// preserving raw crypto receives, timers and non-relay control operations.
     fn across_revision(self, context: &ContextId) -> Self {
         match self {
+            Self::ProviderReceive => Self::Cancelled(context.clone(), Some(PeerId::Provider)),
+            Self::Control(peer) | Self::Timer(peer)
+                if matches!(context, ContextId::External(_)) =>
+            {
+                Self::Cancelled(context.clone(), Some(peer))
+            }
             Self::Receive | Self::Timer(_) => self,
             Self::Control(peer) if *context != ContextId::Gateway => Self::Control(peer),
             Self::Control(peer) => Self::Cancelled(context.clone(), Some(peer)),
@@ -171,6 +240,9 @@ impl Stage {
 pub struct LocalGateway {
     projection: GatewayProjection,
     raw: WorkerGateway,
+    nat: NatTable,
+    provider_keys: std::collections::BTreeMap<EgressId, KeyFingerprint>,
+    path_mtu: PathMtu,
     // Exactly one record per pending raw request, at most one per worker.
     // Forwarding stores only provenance here, never pending plaintext.
     flights: Vec<Flight>,
@@ -212,6 +284,22 @@ impl GatewayHandoff<'_> {
             flight.stage = flight.stage.across_revision(&flight.request.context);
             self.next.flights.push(flight);
         }
+        self.next.nat = std::mem::take(&mut self.previous.nat);
+        self.next.path_mtu = std::mem::take(&mut self.previous.path_mtu);
+        for previous in self.previous.projection.owned_egresses() {
+            if !inherited
+                .iter()
+                .any(|(context, _)| matches!(context, ContextId::External(id) if id==&previous.id))
+            {
+                self.next.nat.discard_egress(&previous.id);
+                self.next.path_mtu.clear(&previous.id);
+            }
+        }
+        retain_nat(
+            &mut self.next.nat,
+            &self.previous.projection,
+            &self.next.projection,
+        );
         std::mem::swap(self.next, self.previous);
         Ok(())
     }
@@ -332,6 +420,9 @@ impl LocalGateway {
         limits: Limits,
         options: WorkerOptions,
     ) -> Result<Self, LocalError> {
+        if !projection.owned_egresses().is_empty() {
+            return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
+        }
         let contexts = local_contexts(
             projection,
             expected_management,
@@ -345,6 +436,9 @@ impl LocalGateway {
         Ok(Self {
             projection: projection.clone(),
             raw,
+            nat: NatTable::default(),
+            provider_keys: Default::default(),
+            path_mtu: Default::default(),
             flights,
             management: None,
             management_key: None,
@@ -360,9 +454,33 @@ impl LocalGateway {
         limits: Limits,
         options: WorkerOptions,
     ) -> Result<Self, LocalError> {
-        Self::managed(projection, management_key, node_key, tenants, |contexts| {
-            WorkerGateway::spawn(contexts, limits, options)
-        })
+        Self::spawn_with_egresses(
+            projection,
+            management_key,
+            node_key,
+            tenants,
+            std::iter::empty(),
+            limits,
+            options,
+        )
+    }
+    pub fn spawn_with_egresses<'a>(
+        projection: &GatewayProjection,
+        management_key: &DevicePublicKey,
+        node_key: &NodeKeys,
+        tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
+        providers: impl IntoIterator<Item = ProviderKeys<'a>>,
+        limits: Limits,
+        options: WorkerOptions,
+    ) -> Result<Self, LocalError> {
+        Self::managed(
+            projection,
+            management_key,
+            node_key,
+            tenants,
+            providers,
+            |contexts| WorkerGateway::spawn(contexts, limits, options),
+        )
     }
 
     /// Validate all assigned keys before preparing only the changed crypto contexts.
@@ -373,6 +491,45 @@ impl LocalGateway {
         node_key: &NodeKeys,
         tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
     ) -> Result<Self, LocalError> {
+        self.replace_with_egresses(
+            projection,
+            management_key,
+            node_key,
+            tenants,
+            std::iter::empty(),
+        )
+    }
+    pub fn replace_with_egresses<'a>(
+        &self,
+        projection: &GatewayProjection,
+        management_key: &DevicePublicKey,
+        node_key: &NodeKeys,
+        tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
+        providers: impl IntoIterator<Item = ProviderKeys<'a>>,
+    ) -> Result<Self, LocalError> {
+        let mut material = Vec::new();
+        for (id, key, psk) in providers {
+            if material.len() >= wgfeel_core::MAX_EGRESSES_PER_NODE {
+                return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
+            }
+            if self
+                .projection
+                .owned_egresses()
+                .iter()
+                .find(|p| &p.id == id)
+                .zip(projection.owned_egresses().iter().find(|p| &p.id == id))
+                .is_some_and(|(old, new)| {
+                    self.management_key.as_ref() == Some(management_key)
+                        && self.projection.management_id() == projection.management_id()
+                        && (new.secret_revision < old.secret_revision
+                            || (old.secret_revision == new.secret_revision
+                                && !self.material_matches(id, key, psk)))
+                })
+            {
+                return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
+            }
+            material.push((id, key, psk));
+        }
         let retain = self.management_key.as_ref() == Some(management_key)
             && self.projection.management_id() == projection.management_id()
             && self.projection.recipient() == projection.recipient()
@@ -392,9 +549,28 @@ impl LocalGateway {
                         && old.service_public_key() == new.service_public_key()
                 })
             });
-        Self::managed(projection, management_key, node_key, tenants, |contexts| {
-            self.raw.replacement(contexts, retain, retain_main_service)
-        })
+        let reusable: Vec<_> = projection
+            .owned_egresses()
+            .iter()
+            .filter(|new| {
+                self.projection
+                    .owned_egresses()
+                    .iter()
+                    .any(|old| same_provider_session(old, new))
+            })
+            .map(|profile| profile.id.clone())
+            .collect();
+        Self::managed(
+            projection,
+            management_key,
+            node_key,
+            tenants,
+            material,
+            |contexts| {
+                self.raw
+                    .replacement(contexts, retain, retain_main_service, &reusable)
+            },
+        )
     }
 
     fn managed<'a>(
@@ -402,6 +578,7 @@ impl LocalGateway {
         management_key: &DevicePublicKey,
         node_key: &NodeKeys,
         tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
+        providers: impl IntoIterator<Item = ProviderKeys<'a>>,
         build: impl FnOnce(Vec<crate::ContextConfig>) -> Result<WorkerGateway, WorkerError>,
     ) -> Result<Self, LocalError> {
         let mut contexts = local_contexts(
@@ -412,6 +589,36 @@ impl LocalGateway {
             tenants,
         )
         .map_err(|error| LocalError::Worker(WorkerError::WireGuard(error)))?;
+        let expected = projection.owned_egresses();
+        let mut provider_keys = std::collections::BTreeMap::new();
+        for (id, private, psk) in providers {
+            let invalid = LocalError::Worker(WorkerError::InvalidConfiguration);
+            let profile = expected.iter().find(|p| &p.id == id).ok_or(invalid)?;
+            if provider_keys.contains_key(id)
+                || profile.node.as_ref() != Some(projection.recipient())
+                || profile.has_preshared_key != psk.is_some()
+                || gotatun::x25519::PublicKey::from(&gotatun::x25519::StaticSecret::from(
+                    *private.expose_bytes(),
+                ))
+                .as_bytes()
+                    != profile.interface_public_key.as_bytes()
+            {
+                return Err(invalid);
+            }
+            provider_keys.insert(id.clone(), KeyFingerprint::new(private, psk));
+            contexts.push(crate::ContextConfig::external(
+                id.clone(),
+                EgressPrivateKey::new(*private.expose_bytes()).map_err(|_| invalid)?,
+                psk.map(|p| PresharedKey::new(*p.expose_bytes()))
+                    .transpose()
+                    .map_err(|_| invalid)?,
+                profile.persistent_keepalive,
+                profile.peer_public_key.clone(),
+            ));
+        }
+        if expected.len() != provider_keys.len() {
+            return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
+        }
         let service = contexts
             .iter_mut()
             .find(|context| context.id == ContextId::Service)
@@ -422,6 +629,9 @@ impl LocalGateway {
         Ok(Self {
             projection: projection.clone(),
             raw,
+            nat: NatTable::default(),
+            provider_keys,
+            path_mtu: Default::default(),
             flights,
             management_key: Some(management_key.clone()),
             management: (projection.recipient() != projection.management_id())
@@ -684,7 +894,7 @@ impl LocalGateway {
         network: &NetworkId,
         origin: &NodeId,
         bytes: &[u8],
-        traffic: Option<Traffic>,
+        traffic: Option<MeshTraffic>,
     ) -> Result<Option<LocalEvent>, LocalError> {
         let endpoint = self
             .projection
@@ -741,6 +951,26 @@ impl LocalGateway {
             _ => Err(LocalError::Worker(WorkerError::Protocol)),
         }
     }
+    fn material_matches(
+        &self,
+        id: &EgressId,
+        key: &EgressPrivateKey,
+        psk: Option<&PresharedKey>,
+    ) -> bool {
+        self.provider_keys
+            .get(id)
+            .is_some_and(|old| old.0.as_ref() == KeyFingerprint::new(key, psk).0.as_ref())
+    }
+    pub fn provider_keys_match<'a>(
+        &self,
+        providers: impl IntoIterator<Item = ProviderKeys<'a>>,
+    ) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        providers
+            .into_iter()
+            .all(|(id, key, psk)| seen.insert(id) && self.material_matches(id, key, psk))
+            && seen.len() == self.provider_keys.len()
+    }
     /// Preserve crypto sessions when only policy/public revision changes.
     pub fn can_replace_projection(&self, next: &GatewayProjection) -> bool {
         self.enrollment.is_none()
@@ -757,6 +987,12 @@ impl LocalGateway {
                 )
             })
             && self.projection.management_id() == next.management_id()
+            && self.projection.owned_egresses().len() == next.owned_egresses().len()
+            && self.projection.owned_egresses().iter().all(|p| {
+                next.owned_egresses()
+                    .iter()
+                    .any(|n| same_provider_session(p, n))
+            })
             && self.projection.assignment() == next.assignment()
             && self.projection.mesh() == next.mesh()
             && self.projection.is_revoked() == next.is_revoked()
@@ -788,6 +1024,7 @@ impl LocalGateway {
             );
             flight.stage = stage.across_revision(&flight.request.context);
         }
+        retain_nat(&mut self.nat, &self.projection, next);
         self.projection = next.clone();
         Ok(())
     }
@@ -835,6 +1072,47 @@ impl LocalGateway {
             Submission::Immediate(event) => encrypted(event).map(Some),
         }
     }
+    pub fn receive_provider(
+        &mut self,
+        id: &EgressId,
+        source: SocketAddr,
+        bytes: &[u8],
+    ) -> Result<Option<EncryptedDatagram>, LocalError> {
+        wgfeel_core::validate_external_endpoint(source)
+            .map_err(|_| LocalError::Worker(WorkerError::InvalidConfiguration))?;
+        let context = ContextId::External(id.clone());
+        match self
+            .raw
+            .receive_mesh(source, bytes, &context, &PeerId::Provider)
+            .map_err(LocalError::Worker)?
+        {
+            Submission::Queued(request) => {
+                self.flights.push(Flight {
+                    request,
+                    stage: Stage::ProviderReceive,
+                });
+                Ok(None)
+            }
+            Submission::Immediate(event) => encrypted(event).map(Some),
+        }
+    }
+
+    pub fn provider_authenticated(&self, id: &EgressId) -> Option<Instant> {
+        self.raw.provider_authenticated(id)
+    }
+    pub fn clear_path_mtu(&mut self, id: &EgressId) {
+        self.path_mtu.clear(id);
+    }
+
+    pub fn set_path_mtu(&mut self, id: &EgressId, mtu: u16) {
+        if self.projection.owned_egresses().iter().any(|p| p.id == *id) {
+            self.path_mtu.record(id, mtu, Instant::now());
+        }
+    }
+    pub fn expire_translations(&mut self, now: Instant) {
+        self.nat.expire(now)
+    }
+
     /// Drives bounded worker I/O and at most one forwarding transition. Busy or
     /// unavailable destinations drop the packet; no deferred replay is retained.
     pub fn poll(&mut self) -> Option<LocalEvent> {
@@ -851,6 +1129,10 @@ impl LocalGateway {
                 generation,
                 reason,
             } => {
+                if let ContextId::External(id) = &context {
+                    self.nat.discard_egress(id);
+                    self.path_mtu.clear(id);
+                }
                 self.flights.retain(|flight| {
                     flight.request.context != context || flight.request.generation != generation
                 });
@@ -874,6 +1156,36 @@ impl LocalGateway {
                 };
                 let flight = self.flights.swap_remove(slot);
                 match flight.stage {
+                    Stage::ProviderReceive => match result {
+                        Ok(Some(DatagramEvent::Plaintext {
+                            context: ContextId::External(id),
+                            peer: PeerId::Provider,
+                            packet,
+                        })) if request.context == ContextId::External(id.clone()) => {
+                            let profile = self
+                                .projection
+                                .owned_egresses()
+                                .iter()
+                                .find(|p| p.id == id)?;
+                            let mtu = self.path_mtu.get(&id, Instant::now());
+                            let action = self.nat.inbound(
+                                profile,
+                                packet.as_bytes(),
+                                mtu,
+                                Instant::now(),
+                            )?;
+                            self.nat_output(
+                                Origin {
+                                    context: request.context,
+                                    generation: request.generation,
+                                    peer: PeerId::Provider,
+                                },
+                                id,
+                                action,
+                            )
+                        }
+                        other => emit(request.context, Some(PeerId::Provider), other, None),
+                    },
                     Stage::Receive => match result {
                         Ok(Some(DatagramEvent::Plaintext {
                             context: ContextId::Gateway,
@@ -1082,13 +1394,121 @@ impl LocalGateway {
         context: ContextId,
         peer: PeerId,
         packet: PacketBytes,
-        expected: Option<Traffic>,
+        expected: Option<MeshTraffic>,
     ) -> Option<LocalEvent> {
         let origin = Origin {
             context: context.clone(),
             generation: request.generation,
             peer: peer.clone(),
         };
+        let (src, dst) = crate::forwarding::addresses(packet.as_bytes()).ok()?;
+        let ContextId::Tenant(network) = &context else {
+            return None;
+        };
+        let external = match (&peer, &expected) {
+            (PeerId::Gateway(sender), Some(MeshTraffic::External(label))) => {
+                if label.device.network() != network {
+                    return None;
+                }
+                let device = self.projection.device(&label.device)?;
+                match label.direction {
+                    Direction::FromEgress => {
+                        let remote = crate::nat::return_remote(packet.as_bytes())?;
+                        if device.gateway() != Some(self.projection.recipient())
+                            || !device.addresses().contains(&dst)
+                            || !winner(
+                                &self.projection,
+                                &label.device,
+                                remote,
+                                &label.egress,
+                                sender,
+                                label.prefix,
+                            )
+                        {
+                            return None;
+                        }
+                        let target = PeerId::Device(label.device.device().clone());
+                        return self.encrypt(origin, context.clone(), target, packet, None);
+                    }
+                    Direction::ToEgress => {
+                        if device.gateway() != Some(sender)
+                            || !device.addresses().contains(&src)
+                            || !winner(
+                                &self.projection,
+                                &label.device,
+                                dst,
+                                &label.egress,
+                                self.projection.recipient(),
+                                label.prefix,
+                            )
+                        {
+                            return None;
+                        }
+                        Some((
+                            label.clone(),
+                            sender.clone(),
+                            self.projection.recipient().clone(),
+                        ))
+                    }
+                }
+            }
+            (PeerId::Device(id), None) => {
+                let endpoint = Endpoint::new(network.clone(), id.clone());
+                if let Destination::Egress {
+                    egress,
+                    node,
+                    prefix,
+                } = self.projection.classify_destination(&endpoint, dst)
+                {
+                    let device = self.projection.device(&endpoint)?;
+                    if !device.addresses().contains(&src)
+                        || device.gateway() != Some(self.projection.recipient())
+                    {
+                        return None;
+                    }
+                    Some((
+                        ExternalTraffic {
+                            direction: Direction::ToEgress,
+                            device: endpoint,
+                            egress,
+                            prefix,
+                        },
+                        self.projection.recipient().clone(),
+                        node,
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((label, home, owner)) = external {
+            if owner != *self.projection.recipient() {
+                return self.encrypt(
+                    origin,
+                    context,
+                    PeerId::Gateway(owner),
+                    packet,
+                    Some(MeshTraffic::External(label)),
+                );
+            }
+            let profile = self
+                .projection
+                .owned_egresses()
+                .iter()
+                .find(|p| p.id == label.egress)?;
+            let binding = NatBinding {
+                device: label.device,
+                home,
+                inside: src,
+                prefix: label.prefix,
+            };
+            let mtu = self.path_mtu.get(&label.egress, Instant::now());
+            let action =
+                self.nat
+                    .outbound(profile, &binding, packet.as_bytes(), mtu, Instant::now())?;
+            return self.nat_output(origin, label.egress, action);
+        }
         let (traffic, home, packet) =
             match authorize_routed(&self.projection, context, peer, packet) {
                 Ok(value) => value,
@@ -1102,7 +1522,7 @@ impl LocalGateway {
             };
         if expected
             .as_ref()
-            .is_some_and(|expected| expected != &traffic)
+            .is_some_and(|expected| expected != &MeshTraffic::Device(traffic.clone()))
         {
             return Some(dropped(
                 origin.context,
@@ -1116,11 +1536,89 @@ impl LocalGateway {
         };
         let context = ContextId::Tenant(traffic.destination.network().clone());
         let remote = matches!(target, PeerId::Gateway(_));
+        self.encrypt(
+            origin,
+            context,
+            target,
+            packet,
+            remote.then_some(MeshTraffic::Device(traffic)),
+        )
+    }
+
+    fn nat_output(
+        &mut self,
+        origin: Origin,
+        id: EgressId,
+        action: NatAction,
+    ) -> Option<LocalEvent> {
+        match action {
+            NatAction::ToProvider(packet) => self.encrypt(
+                origin,
+                ContextId::External(id),
+                PeerId::Provider,
+                packet,
+                None,
+            ),
+            NatAction::ToDevice {
+                binding,
+                remote,
+                packet,
+            } => {
+                let device = self.projection.device(&binding.device)?;
+                if device.gateway() != Some(&binding.home)
+                    || !device.addresses().contains(&binding.inside)
+                    || !winner(
+                        &self.projection,
+                        &binding.device,
+                        remote,
+                        &id,
+                        self.projection.recipient(),
+                        binding.prefix,
+                    )
+                {
+                    return None;
+                }
+                let ctx = ContextId::Tenant(binding.device.network().clone());
+                if binding.home == *self.projection.recipient() {
+                    self.encrypt(
+                        origin,
+                        ctx,
+                        PeerId::Device(binding.device.device().clone()),
+                        packet,
+                        None,
+                    )
+                } else {
+                    let label = ExternalTraffic {
+                        direction: Direction::FromEgress,
+                        device: binding.device,
+                        egress: id,
+                        prefix: binding.prefix,
+                    };
+                    self.encrypt(
+                        origin,
+                        ctx,
+                        PeerId::Gateway(binding.home),
+                        packet,
+                        Some(MeshTraffic::External(label)),
+                    )
+                }
+            }
+        }
+    }
+
+    fn encrypt(
+        &mut self,
+        origin: Origin,
+        context: ContextId,
+        target: PeerId,
+        packet: PacketBytes,
+        traffic: Option<MeshTraffic>,
+    ) -> Option<LocalEvent> {
         match self.raw.send_datagram(&context, &target, packet.as_bytes()) {
             Ok(request) => {
                 self.flights.push(Flight {
                     request,
-                    stage: Stage::Forward(origin, remote.then_some(traffic)),
+                    stage: Stage::Forward(origin, traffic),
                 });
                 None
             }
@@ -1131,6 +1629,53 @@ impl LocalGateway {
             )),
         }
     }
+}
+
+fn winner(
+    projection: &GatewayProjection,
+    device: &Endpoint,
+    remote: std::net::IpAddr,
+    id: &EgressId,
+    owner: &NodeId,
+    rule: wgfeel_core::IpPrefix,
+) -> bool {
+    matches!(projection.classify_destination(device,remote), Destination::Egress{egress,node,prefix} if egress==*id && node==*owner && prefix==rule)
+}
+
+fn home_tenant_key<'a>(
+    projection: &'a GatewayProjection,
+    binding: &NatBinding,
+) -> Option<&'a DevicePublicKey> {
+    projection
+        .mesh()
+        .iter()
+        .find(|n| n.recipient() == &binding.home)?
+        .tenants()
+        .iter()
+        .find(|t| t.network() == binding.device.network())
+        .map(|t| t.public_key())
+}
+
+fn retain_nat(table: &mut NatTable, previous: &GatewayProjection, projection: &GatewayProjection) {
+    table.retain(Instant::now(), |id, binding, remote| {
+        previous
+            .device(&binding.device)
+            .zip(projection.device(&binding.device))
+            .is_some_and(|(old, d)| {
+                old.public_key() == d.public_key()
+                    && d.gateway() == Some(&binding.home)
+                    && d.addresses().contains(&binding.inside)
+            })
+            && home_tenant_key(previous, binding) == home_tenant_key(projection, binding)
+            && winner(
+                projection,
+                &binding.device,
+                remote,
+                id,
+                projection.recipient(),
+                binding.prefix,
+            )
+    });
 }
 
 fn dropped(context: ContextId, peer: Option<PeerId>, reason: LocalError) -> LocalEvent {
@@ -1144,7 +1689,7 @@ fn emit(
     context: ContextId,
     peer: Option<PeerId>,
     result: Result<Option<DatagramEvent>, WireGuardError>,
-    traffic: Option<Traffic>,
+    traffic: Option<MeshTraffic>,
 ) -> Option<LocalEvent> {
     match result {
         Ok(None) => None,
@@ -1160,6 +1705,9 @@ fn emit(
                 packet,
                 traffic,
             },
+            Ok(packet) if matches!(packet.context, ContextId::External(_)) => {
+                LocalEvent::ProviderOutput(packet)
+            }
             Ok(packet) => LocalEvent::Network(packet),
             Err(error) => dropped(context, peer, error),
         }),
@@ -1422,5 +1970,22 @@ mod capability_tests {
             .across_revision(&tenant),
             Stage::Cancelled(ContextId::Tenant(_), Some(PeerId::Gateway(_)))
         ));
+    }
+}
+
+#[cfg(test)]
+mod path_mtu_tests {
+    use super::*;
+    #[test]
+    fn pmtu_below_ipv6_minimum_expires_and_a_reconnected_socket_starts_fresh() {
+        let id = EgressId::new("vpn").unwrap();
+        let now = Instant::now();
+        let mut cache = PathMtu::default();
+        cache.record(&id, 1200, now);
+        assert_eq!(cache.get(&id, now + Duration::from_secs(1)), 1200);
+        assert_eq!(cache.get(&id, now + PMTU_LEASE), 1280);
+        cache.record(&id, 1120, now + PMTU_LEASE);
+        cache.clear(&id);
+        assert_eq!(cache.get(&id, now + PMTU_LEASE), 1280);
     }
 }

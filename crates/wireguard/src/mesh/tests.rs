@@ -18,6 +18,13 @@ fn models_with_transit(mode: wgfeel_core::TrafficMode) -> Vec<Mesh> {
     models_at_revision(mode, 10)
 }
 fn models_at_revision(mode: wgfeel_core::TrafficMode, generation: u64) -> Vec<Mesh> {
+    models_with_policy(mode, generation, wgfeel_core::EgressPolicy::default())
+}
+fn models_with_policy(
+    mode: wgfeel_core::TrafficMode,
+    generation: u64,
+    policy: wgfeel_core::EgressPolicy,
+) -> Vec<Mesh> {
     let networks = ["alice", "bob"]
         .iter()
         .enumerate()
@@ -95,6 +102,7 @@ fn models_at_revision(mode: wgfeel_core::TrafficMode, generation: u64) -> Vec<Me
         nodes,
     )
     .unwrap();
+    let routing = routing.with_egress_policy(policy).unwrap();
     ["a", "b", "c"]
         .iter()
         .enumerate()
@@ -388,7 +396,7 @@ fn mesh_detects_direct_link_loss_relays_full_mtu_and_restores_direct_route() {
     };
     assert_eq!(network, net("alice"));
     assert_eq!(origin, id("a"));
-    assert_eq!(received, Some(traffic));
+    assert_eq!(received, Some(MeshTraffic::Device(traffic)));
     assert_eq!(packet.as_bytes(), ciphertext);
     links[0][2] = true;
     links[2][0] = true;
@@ -426,14 +434,14 @@ fn relays_enforce_scope_home_bindings_and_acl_and_reject_control_data_confusion(
         origin: 0,
         target: 2,
         network: net("alice"),
-        traffic: Some(traffic),
+        traffic: Some(MeshTraffic::Device(traffic)),
         ttl: 3,
         total: 64,
     };
-    relay.traffic = Some(Traffic {
+    relay.traffic = Some(MeshTraffic::Device(Traffic {
         source: ep("bob", "phone"),
         destination: ep("alice", "laptop"),
-    });
+    }));
     assert!(!models[1].allowed(&relay, 0));
     relay.traffic = None;
     assert!(
@@ -446,10 +454,10 @@ fn relays_enforce_scope_home_bindings_and_acl_and_reject_control_data_confusion(
             )
             .is_empty()
     );
-    relay.traffic = Some(Traffic {
+    relay.traffic = Some(MeshTraffic::Device(Traffic {
         source: ep("alice", "phone"),
         destination: ep("alice", "laptop"),
-    });
+    }));
     relay.origin = 1;
     assert!(!models[1].allowed(&relay, 0));
     relay.origin = 0;
@@ -506,10 +514,10 @@ fn relay_codec_is_bounded_for_maximum_identifiers_and_rejects_every_truncation()
         origin: 0,
         target: 1,
         network,
-        traffic: Some(Traffic {
+        traffic: Some(MeshTraffic::Device(Traffic {
             source: endpoint.clone(),
             destination: endpoint,
-        }),
+        })),
         ttl: 150,
         total: MAX_DATAGRAM_SIZE,
     };
@@ -519,9 +527,9 @@ fn relay_codec_is_bounded_for_maximum_identifiers_and_rejects_every_truncation()
         assert!(decode(&packet.as_bytes()[..length]).is_none());
     }
     let (_, _, body) = decode(packet.as_bytes()).unwrap();
-    assert!(read_relay(body).is_some());
+    assert!(read_relay(4, body).is_some());
     for length in 0..body.len() {
-        assert!(read_relay(&body[..length]).is_none());
+        assert!(read_relay(4, &body[..length]).is_none());
     }
 }
 
@@ -588,10 +596,10 @@ fn fragments_with_different_remaining_hops_reassemble_only_inside_their_revision
         origin: 0,
         target: 2,
         network: net("alice"),
-        traffic: Some(Traffic {
+        traffic: Some(MeshTraffic::Device(Traffic {
             source: ep("alice", "phone"),
             destination: ep("alice", "laptop"),
-        }),
+        })),
         ttl: 2,
         total: data.len(),
     };
@@ -687,4 +695,158 @@ fn inherit_health_preserves_active_endpoint_when_secondary_endpoints_change() {
     assert_eq!(updated.peers[1].active_endpoint, Some(active));
     assert!(updated.peers[1].pong.is_some());
     assert_eq!(updated.peers[1].next_endpoint, 0);
+}
+
+#[test]
+fn external_frames_use_canonical_prefix_and_960_byte_fragments() {
+    let id = "x".repeat(64);
+    let network = net(&id);
+    let prefix: IpPrefix = "2001:db8::/32".parse().unwrap();
+    for outbound in [false, true] {
+        let relay = Relay {
+            id: 44,
+            origin: 1,
+            target: 0,
+            network: network.clone(),
+            ttl: 2,
+            total: 1312,
+            traffic: Some(MeshTraffic::External(ExternalTraffic {
+                direction: if outbound {
+                    Direction::ToEgress
+                } else {
+                    Direction::FromEgress
+                },
+                device: Endpoint::new(network.clone(), DeviceId::new(&id).unwrap()),
+                egress: EgressId::new(&id).unwrap(),
+                prefix,
+            })),
+        };
+        for (fragment, len) in [(0, 960), (1, 352)] {
+            let bytes = relay_packet(12, &relay, fragment, &vec![1; len]);
+            assert_eq!(bytes.as_bytes().len(), 263 + len);
+            let (_, kind, body) = decode(bytes.as_bytes()).unwrap();
+            assert_eq!(kind, if outbound { 5 } else { 6 });
+            let (decoded, idx, data) = read_relay(kind, body).unwrap();
+            assert_eq!(relay.traffic, decoded.traffic);
+            assert_eq!((idx, data.len()), (fragment, len));
+            let mut noncanonical = body.to_vec();
+            noncanonical[12 + 195 + 2 + 15] = 1;
+            assert!(read_relay(kind, &noncanonical).is_none());
+            assert!(read_relay(kind, &body[..body.len() - 1]).is_none());
+        }
+    }
+}
+
+#[test]
+fn typed_provider_traffic_uses_both_direct_and_relay_paths_and_honors_partition() {
+    use wgfeel_core::{
+        ClientId, EgressDnsSelection, EgressPolicy, EgressProfileFields, UserEgressAssignment,
+        UserEgresses,
+    };
+    let egress = EgressId::new("provider").unwrap();
+    let prefix: IpPrefix = "203.0.113.0/24".parse().unwrap();
+    let profile = EgressProfileFields {
+        id: egress.clone(),
+        name: "provider".into(),
+        node: Some(id("c")),
+        pending_node: None,
+        secret_revision: 1,
+        interface_public_key: DevicePublicKey::new([67; 32]).unwrap(),
+        peer_public_key: DevicePublicKey::new([99; 32]).unwrap(),
+        endpoint: "192.0.2.3:51820".parse().unwrap(),
+        addresses: vec!["172.20.0.2".parse().unwrap()],
+        dns_servers: vec![],
+        mtu: None,
+        allowed_ips: vec![prefix],
+        persistent_keepalive: None,
+        has_preshared_key: false,
+    }
+    .try_into()
+    .unwrap();
+    let policy = EgressPolicy {
+        profiles: vec![profile],
+        users: vec![UserEgresses {
+            user: ClientId::new("alice").unwrap(),
+            network: net("alice"),
+            egresses: vec![UserEgressAssignment {
+                egress_id: egress.clone(),
+                routes: vec![prefix],
+                dns: EgressDnsSelection::None {},
+            }],
+        }],
+        reservations: vec![],
+    };
+    let mut models = models_with_policy(wgfeel_core::TrafficMode::Relay, 10, policy);
+    let mut ciphertext = vec![42; MAX_DATAGRAM_SIZE];
+    ciphertext[..4].copy_from_slice(&[4, 0, 0, 0]);
+    let mut links = [[true; 3]; 3];
+    for (start, end, hop) in [
+        (0, 2000, Some("c")),
+        (2100, 7000, Some("b")),
+        (7100, 14000, None),
+        (14100, 20500, Some("c")),
+    ] {
+        if start == 2100 {
+            links[0][2] = false;
+            links[2][0] = false
+        }
+        if start == 7100 {
+            links[1][2] = false;
+            links[2][1] = false
+        }
+        if start == 14100 {
+            links = [[true; 3]; 3]
+        }
+        advance(&mut models, &links, start, end);
+        let now = Duration::from_millis(end);
+        for (source, target, direction) in
+            [(0, 2, Direction::ToEgress), (2, 0, Direction::FromEgress)]
+        {
+            let label = ExternalTraffic {
+                direction,
+                egress: egress.clone(),
+                prefix,
+                device: ep("alice", "phone"),
+            };
+            let dest = if target == 0 { id("a") } else { id("c") };
+            let frames = models[source].transmit_scoped(
+                &net("alice"),
+                &dest,
+                &ciphertext,
+                Some(MeshTraffic::External(label.clone())),
+                now,
+            );
+            let Some(hop) = hop else {
+                assert!(frames.is_empty());
+                continue;
+            };
+            assert_eq!(frames.len(), 2);
+            let expected_hop = if hop == "c" && target == 0 { "a" } else { hop };
+            assert!(frames.iter().all(|frame| matches!(frame,Action::Send{node,packet} if node==&id(expected_hop) && packet.as_bytes()[33]==if source==0{5}else{6})));
+            let delivered = pump(
+                &mut models,
+                &links,
+                frames.into_iter().rev().map(|f| (source, f)).collect(),
+                now,
+            );
+            assert!(
+                matches!(&delivered[..],[Action::Deliver{packet,traffic:Some(MeshTraffic::External(received)),..}] if received==&label && packet.as_bytes()==ciphertext)
+            );
+            let spoof = ExternalTraffic {
+                device: ep("alice", "laptop"),
+                ..label
+            };
+            assert!(
+                models[source]
+                    .transmit_scoped(
+                        &net("alice"),
+                        &dest,
+                        &ciphertext,
+                        Some(MeshTraffic::External(spoof)),
+                        now
+                    )
+                    .is_empty()
+            );
+        }
+    }
 }

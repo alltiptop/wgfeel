@@ -32,7 +32,23 @@ pub(super) fn invitation_mode(fixture: &Fixture, mode: Option<&str>) -> Invitati
     Invitation::decode(uri).unwrap()
 }
 fn exchange(invitation: &Invitation, request: Request<'_>, timeout: Duration) -> Option<Response> {
-    let endpoint = invitation.endpoints()[0];
+    wire_exchange(
+        invitation.endpoints()[0],
+        invitation.management(),
+        invitation.management_public_key(),
+        ServicePrivateKey::new(*invitation.temporary_private_key().expose_bytes()).unwrap(),
+        http::encode_request(request).unwrap(),
+        timeout,
+    )
+}
+pub(super) fn wire_exchange(
+    endpoint: SocketAddr,
+    manager: &wgfeel_core::NodeId,
+    server_key: &DevicePublicKey,
+    private: ServicePrivateKey,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    timeout: Duration,
+) -> Option<Response> {
     let listen: SocketAddr = if endpoint.is_ipv4() {
         "127.0.0.1:0"
     } else {
@@ -40,13 +56,13 @@ fn exchange(invitation: &Invitation, request: Request<'_>, timeout: Duration) ->
     }
     .parse()
     .unwrap();
-    let peer = PeerId::Node(invitation.management().clone());
+    let peer = PeerId::Node(manager.clone());
     let mut gateway = Gateway::new(
         vec![ContextConfig::service(
-            ServicePrivateKey::new(*invitation.temporary_private_key().expose_bytes()).unwrap(),
+            private,
             vec![PeerConfig {
                 id: peer.clone(),
-                public_key: invitation.management_public_key().clone(),
+                public_key: server_key.clone(),
             }],
         )],
         Limits::default(),
@@ -54,12 +70,8 @@ fn exchange(invitation: &Invitation, request: Request<'_>, timeout: Duration) ->
     .unwrap();
     let transport = UdpTransport::from_socket(UdpSocket::bind(listen).unwrap()).unwrap();
     let mut buffers = tcp::Buffers::new(1).unwrap();
-    let mut tcp = tcp::Client::new(
-        &mut buffers,
-        wgfeel_host::random_seed().unwrap(),
-        http::encode_request(request).unwrap(),
-    )
-    .unwrap();
+    let mut tcp =
+        tcp::Client::new(&mut buffers, wgfeel_host::random_seed().unwrap(), bytes).unwrap();
     if let Some(event) = gateway
         .initiate_at(&ContextId::Service, &peer, endpoint)
         .unwrap()

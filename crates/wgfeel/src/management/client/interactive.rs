@@ -2,6 +2,8 @@ use super::{Options, Response, USAGE, valid_id};
 use serde::Deserialize;
 use std::io::{BufRead, Write};
 
+mod egress;
+
 type Api<'a> = dyn Fn(&str, &str, Option<u64>, &[u8]) -> Result<Response> + 'a;
 type Result<T> = std::result::Result<T, &'static str>;
 const IO_ERROR: &str = "cannot read or write terminal";
@@ -12,6 +14,8 @@ struct User {
     name: String,
     suspended: bool,
     devices: Vec<Device>,
+    #[serde(default)]
+    egresses: Vec<egress::Assignment>,
 }
 #[derive(Clone, Deserialize)]
 struct Device {
@@ -100,6 +104,7 @@ struct Ui<'a> {
     api: &'a Api<'a>,
     input: &'a mut dyn BufRead,
     out: &'a mut dyn Write,
+    terminal: bool,
 }
 impl Ui<'_> {
     fn request(
@@ -110,6 +115,9 @@ impl Ui<'_> {
         body: &[u8],
     ) -> Result<Response> {
         let response = (self.api)(method, path, revision, body)?;
+        self.accept(response)
+    }
+    fn accept(&mut self, response: Response) -> Result<Response> {
         if !(200..300).contains(&response.status) {
             #[derive(Deserialize)]
             struct Error {
@@ -360,7 +368,7 @@ impl Ui<'_> {
             };
             writeln!(
                 self.out,
-                "\n{}: {}\nStatus: {}\n1. add device\n2. remove user\n3. {} user\n4. show devices",
+                "\n{}: {}\nStatus: {}\n1. add device\n2. remove user\n3. {} user\n4. show devices\n5. egresses",
                 clean(&user.name),
                 user.id,
                 if user.suspended {
@@ -371,7 +379,10 @@ impl Ui<'_> {
                 if user.suspended { "resume" } else { "suspend" }
             )
             .map_err(|_| IO_ERROR)?;
-            match choice(self.input, self.out, 4)? {
+            if !user.egresses.is_empty() {
+                self.describe_assignments(&user.egresses, revision)?;
+            }
+            match choice(self.input, self.out, 5)? {
                 Some(0) => {
                     if let Some(device_name) = name(self.input, self.out, "Device name: ")? {
                         let id = self.create_device(&user, &device_name, revision)?;
@@ -407,6 +418,7 @@ impl Ui<'_> {
                     )
                     .map_err(|_| IO_ERROR)?;
                 }
+                Some(4) => self.user_egress_menu(&user.id)?,
                 Some(3) => {
                     if let Some(device) = self.select_device(&user)? {
                         self.device_menu(&device.id)?;
@@ -445,7 +457,21 @@ pub(super) fn run(
     api: &Api<'_>,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
+    terminal: bool,
 ) -> Result<()> {
+    let mut ui = Ui {
+        api,
+        input,
+        out,
+        terminal,
+    };
+    if kind == "egress" {
+        return egress::run(&mut ui, options, false);
+    }
+    if kind == "user" && options.positional.first().is_some_and(|s| s == "egress") {
+        options.positional.remove(0);
+        return egress::run(&mut ui, options, true);
+    }
     let operation = if options.positional.is_empty() {
         String::new()
     } else {
@@ -480,7 +506,6 @@ pub(super) fn run(
     }) {
         return Err("invalid name");
     }
-    let mut ui = Ui { api, input, out };
     match (kind, operation.as_str()) {
         ("user", "") => ui.home(),
         ("user", "list") => ui.user_list(),
@@ -549,7 +574,8 @@ mod tests {
                 Options::parse(&["delete".into(), "d1".into()]).unwrap(),
                 &api,
                 &mut std::io::Cursor::new("y\n"),
-                &mut out
+                &mut out,
+                true
             )
             .is_err()
         );

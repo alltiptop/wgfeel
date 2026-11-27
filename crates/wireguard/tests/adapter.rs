@@ -561,6 +561,7 @@ fn two_tenants_and_service_keep_overlapping_addresses_and_equal_device_names_sep
             device("gateway")
         };
         let remote_config = match &context {
+            ContextId::External(_) => unreachable!("public listener fixture"),
             ContextId::Tenant(network) => tenant(
                 network.as_str(),
                 client_secret,

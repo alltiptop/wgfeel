@@ -68,6 +68,12 @@ pub(super) fn encode_bootstrap(
         return Err(ProtocolError::InvalidFrame);
     }
     let mut size = 40;
+    if let crate::PrivateKey::External { psk, .. } = &config.private_key {
+        if config.peers.len() != 1 {
+            return Err(ProtocolError::InvalidFrame);
+        }
+        size += 3 + if psk.is_some() { 32 } else { 0 };
+    }
     for peer in &config.peers {
         let id = peer_name(&peer.id);
         if id.is_empty() || id.len() > 64 || !role_matches(&config.id, &peer.id) {
@@ -93,6 +99,13 @@ pub(super) fn encode_bootstrap(
         );
         frame.extend_from_slice(id.as_bytes());
         frame.extend_from_slice(peer.public_key.as_bytes());
+    }
+    if let crate::PrivateKey::External { psk, keepalive, .. } = &config.private_key {
+        frame.extend_from_slice(&keepalive.map_or(0, |k| k.get()).to_le_bytes());
+        frame.push(u8::from(psk.is_some()));
+        if let Some(key) = psk {
+            frame.extend_from_slice(key.expose_bytes());
+        }
     }
     Ok(frame)
 }
@@ -120,6 +133,7 @@ pub(super) fn decode_bootstrap(
         let name =
             std::str::from_utf8(cursor.take(length)?).map_err(|_| ProtocolError::InvalidFrame)?;
         let id = match (context, mesh) {
+            (ContextId::External(_), false) if name == "provider" => PeerId::Provider,
             (ContextId::Tenant(_), true) => {
                 PeerId::Gateway(NodeId::new(name).map_err(|_| ProtocolError::InvalidFrame)?)
             }
@@ -140,11 +154,38 @@ pub(super) fn decode_bootstrap(
         .map_err(|_| ProtocolError::InvalidFrame)?;
         peers.push(PeerConfig { id, public_key });
     }
-    cursor.finish()?;
     if !peer_counts(&peers) {
         return Err(ProtocolError::InvalidFrame);
     }
     let config = match context {
+        ContextId::External(id) => {
+            if peers.len() != 1 {
+                return Err(ProtocolError::InvalidFrame);
+            }
+            let keepalive = std::num::NonZeroU16::new(cursor.u16()?);
+            let psk = match cursor.u8()? {
+                0 => None,
+                1 => Some(
+                    wgfeel_core::PresharedKey::new(
+                        cursor
+                            .take(32)?
+                            .try_into()
+                            .map_err(|_| ProtocolError::InvalidFrame)?,
+                    )
+                    .map_err(|_| ProtocolError::InvalidFrame)?,
+                ),
+                _ => return Err(ProtocolError::InvalidFrame),
+            };
+            let peer = peers.pop().ok_or(ProtocolError::InvalidFrame)?;
+            ContextConfig::external(
+                id.clone(),
+                wgfeel_core::EgressPrivateKey::new(*key)
+                    .map_err(|_| ProtocolError::InvalidFrame)?,
+                psk,
+                keepalive,
+                peer.public_key,
+            )
+        }
         ContextId::Tenant(id) => ContextConfig::tenant(
             id.clone(),
             TenantPrivateKey::new(*key).map_err(|_| ProtocolError::InvalidFrame)?,
@@ -159,6 +200,7 @@ pub(super) fn decode_bootstrap(
             peers,
         ),
     };
+    cursor.finish()?;
     Ok((
         config,
         Limits {
@@ -167,7 +209,14 @@ pub(super) fn decode_bootstrap(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn encode_request(request: &Request) -> Result<Vec<u8>, ProtocolError> {
+    encode_request_scoped(false, request)
+}
+pub(super) fn encode_request_scoped(
+    external: bool,
+    request: &Request,
+) -> Result<Vec<u8>, ProtocolError> {
     if let Operation::SetServicePeers { peers } = &request.operation {
         if peers.len() > MAX_SERVICE_PEERS
             || peers.iter().any(|peer| !matches!(peer.id, PeerId::Node(_)))
@@ -193,9 +242,18 @@ pub(super) fn encode_request(request: &Request) -> Result<Vec<u8>, ProtocolError
         return Ok(frame);
     }
     let (tag, peer, packet) = match &request.operation {
-        Operation::Receive { peer, packet } => {
-            (1, peer.unwrap_or(NONE), Some((packet, MAX_DATAGRAM_SIZE)))
-        }
+        Operation::Receive { peer, packet } => (
+            1,
+            peer.unwrap_or(NONE),
+            Some((
+                packet,
+                if external {
+                    crate::MAX_PROVIDER_DATAGRAM_SIZE
+                } else {
+                    MAX_DATAGRAM_SIZE
+                },
+            )),
+        ),
         Operation::Initiate { peer } => (2, required_peer(*peer)?, None),
         Operation::Send { peer, packet } => {
             (3, required_peer(*peer)?, Some((packet, MAX_PLAINTEXT_SIZE)))
@@ -224,7 +282,11 @@ pub(super) fn encode_request(request: &Request) -> Result<Vec<u8>, ProtocolError
     Ok(frame)
 }
 
+#[cfg(test)]
 pub(super) fn decode_request(body: &[u8]) -> Result<Request, ProtocolError> {
+    decode_request_scoped(false, body)
+}
+pub(super) fn decode_request_scoped(external: bool, body: &[u8]) -> Result<Request, ProtocolError> {
     let mut cursor = Cursor::new(body, 3)?;
     let sequence = cursor.u64()?;
     let tag = cursor.u8()?;
@@ -232,7 +294,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, ProtocolError> {
     let operation = match tag {
         1 => Operation::Receive {
             peer: optional_peer(peer),
-            packet: cursor.packet(MAX_DATAGRAM_SIZE)?,
+            packet: cursor.packet(if external {
+                crate::MAX_PROVIDER_DATAGRAM_SIZE
+            } else {
+                MAX_DATAGRAM_SIZE
+            })?,
         },
         2 => Operation::Initiate {
             peer: required_peer(peer)?,
@@ -281,7 +347,7 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, ProtocolError> {
     })
 }
 
-pub(super) fn encode_reply(reply: &Reply) -> Result<Vec<u8>, ProtocolError> {
+pub(super) fn encode_reply_scoped(external: bool, reply: &Reply) -> Result<Vec<u8>, ProtocolError> {
     if reply.indices.len() > MAX_BINDINGS || reply.authenticated_peer == Some(NONE) {
         return Err(ProtocolError::InvalidFrame);
     }
@@ -310,7 +376,15 @@ pub(super) fn encode_reply(reply: &Reply) -> Result<Vec<u8>, ProtocolError> {
         Ok(Some(Output::Plaintext { peer, packet })) => {
             frame.push(2);
             frame.extend_from_slice(&required_peer(*peer)?.to_le_bytes());
-            put_packet(&mut frame, packet, MAX_PLAINTEXT_SIZE)?;
+            put_packet(
+                &mut frame,
+                packet,
+                if external {
+                    crate::MAX_PROVIDER_PLAINTEXT
+                } else {
+                    MAX_PLAINTEXT_SIZE
+                },
+            )?;
         }
         Err(error) => {
             frame.push(3);
@@ -320,7 +394,11 @@ pub(super) fn encode_reply(reply: &Reply) -> Result<Vec<u8>, ProtocolError> {
     Ok(frame)
 }
 
+#[cfg(test)]
 pub(super) fn decode_reply(body: &[u8]) -> Result<Reply, ProtocolError> {
+    decode_reply_scoped(false, body)
+}
+pub(super) fn decode_reply_scoped(external: bool, body: &[u8]) -> Result<Reply, ProtocolError> {
     let mut cursor = Cursor::new(body, 4)?;
     let sequence = cursor.u64()?;
     let authenticated_peer = optional_peer(cursor.u16()?);
@@ -343,7 +421,11 @@ pub(super) fn decode_reply(body: &[u8]) -> Result<Reply, ProtocolError> {
         })),
         2 => Ok(Some(Output::Plaintext {
             peer: required_peer(cursor.u16()?)?,
-            packet: cursor.packet(MAX_PLAINTEXT_SIZE)?,
+            packet: cursor.packet(if external {
+                crate::MAX_PROVIDER_PLAINTEXT
+            } else {
+                MAX_PLAINTEXT_SIZE
+            })?,
         })),
         3 => Err(decode_error(cursor.u8()?)?),
         _ => return Err(ProtocolError::InvalidFrame),
@@ -403,7 +485,9 @@ fn peer_counts(peers: &[PeerConfig]) -> bool {
             <= wgfeel_core::MAX_GATEWAYS
 }
 fn peer_limit(context: &ContextId) -> usize {
-    if matches!(context, ContextId::Service) {
+    if matches!(context, ContextId::External(_)) {
+        1
+    } else if matches!(context, ContextId::Service) {
         MAX_SERVICE_PEERS
     } else if *context == ContextId::Gateway {
         wgfeel_core::MAX_GATEWAYS
@@ -413,6 +497,7 @@ fn peer_limit(context: &ContextId) -> usize {
 }
 fn peer_name(peer: &PeerId) -> &str {
     match peer {
+        PeerId::Provider => "provider",
         PeerId::Device(id) => id.as_str(),
         PeerId::Node(id) | PeerId::Gateway(id) => id.as_str(),
     }
@@ -422,6 +507,7 @@ fn role_matches(context: &ContextId, peer: &PeerId) -> bool {
         (context, peer),
         (ContextId::Tenant(_), PeerId::Device(_) | PeerId::Gateway(_))
             | (ContextId::Service | ContextId::Gateway, PeerId::Node(_))
+            | (ContextId::External(_), PeerId::Provider)
     )
 }
 fn required_peer(peer: u16) -> Result<u16, ProtocolError> {

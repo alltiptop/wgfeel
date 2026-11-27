@@ -18,7 +18,7 @@ with your own. Interactive selection uses numbers; explicit arguments use IDs.
 
 ## Connection options
 
-Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either --profile or both --socket and --credential-file. Connection options may appear anywhere after user, device, node or config. File ownership and permission checks still apply.
+Administrative commands connect to the installed main Unix socket automatically. A downloaded binary defaults to /opt/wgfeel; an installed binary uses its own installation base. Alternatively, pass either --profile or both --socket and --credential-file. Connection options may appear anywhere after user, device, egress, node or config. File ownership and permission checks still apply.
 
 | Option | Description |
 | --- | --- |
@@ -56,6 +56,16 @@ Administrative commands connect to the installed main Unix socket automatically.
 | [config identity](#wgfeel-config-identity) | Display main's public service identity and enrollment information |
 | [config distribution](#wgfeel-config-distribution) | Display configuration delivery status for registered nodes |
 | [token rotate](#wgfeel-token-rotate) | Revoke the old administrator token and print the new token once |
+| [egress](#wgfeel-egress) | Open the interactive menu to import, inspect, place and delete external WireGuard profiles |
+| [egress add](#wgfeel-egress-add) | Import one provider profile |
+| [egress list](#wgfeel-egress-list) | List saved egress profiles and their placement |
+| [egress show](#wgfeel-egress-show) | Show public provider parameters, allowed prefixes and placement |
+| [egress replace](#wgfeel-egress-replace) | Replace the provider configuration under the same egress ID |
+| [egress node](#wgfeel-egress-node) | Inspect placement or request a global attach, move or detach |
+| [egress delete](#wgfeel-egress-delete) | Delete a saved egress after confirmation at a terminal |
+| [user egress list](#wgfeel-user-egress-list) | List the user's egress assignments, placement, routes and DNS selection |
+| [user egress set](#wgfeel-user-egress-set) | Create or replace one assignment |
+| [user egress remove](#wgfeel-user-egress-remove) | Remove one assignment after confirmation at a terminal |
 
 <a id="wgfeel-install"></a>
 
@@ -206,7 +216,7 @@ wgfeel --build-info
 wgfeel completions SHELL
 ```
 
-Print shell integration for Bash or Zsh. Source it in the matching shell after enabling its standard completion system. Static commands require no connection. User, device and node IDs are queried using the current administrator connection and permissions; unavailable data produces no dynamic suggestions.
+Print shell integration for Bash or Zsh. Source it in the matching shell after enabling its standard completion system. Static commands require no connection. User, device, egress and node IDs are queried using the current administrator connection and permissions; unavailable data produces no dynamic suggestions.
 
 | Argument / option | Description |
 | --- | --- |
@@ -617,4 +627,219 @@ Example:
 
 ```sh
 wgfeel token rotate
+```
+
+<a id="wgfeel-egress"></a>
+
+### wgfeel egress
+
+```text
+wgfeel egress
+```
+
+Open the interactive menu to import, inspect, place and delete external WireGuard profiles.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel egress
+```
+
+<a id="wgfeel-egress-add"></a>
+
+### wgfeel egress add
+
+```text
+wgfeel egress add [FILE] [OPTIONS]
+```
+
+Import one provider profile. With a node and users, placement and all initial user assignments are saved together. In scripts, omitted names default to the endpoint host, omitted nodes leave the profile unassigned and omitted users grant no routes.
+
+Accepts the [connection options](#connection-options).
+
+| Argument / option | Description |
+| --- | --- |
+| `--config-file PATH` | Read one WireGuard provider profile from this file (16 KiB maximum). |
+| `--config-stdin` | Read the provider profile from standard input through EOF. This disables all prompts. |
+| `--name NAME` | Display name of the egress profile, up to 128 bytes. |
+| `--node NODE_ID` | Place the profile on this eligible entry node. |
+| `--users IDS` | Comma-separated user IDs. Requires a node and either --routes or --internet. |
+| `--internet` | Grant the default route for each address family supported by the profile and its provider AllowedIPs. |
+| `--routes CIDRS` | Comma-separated explicit route prefixes for this assignment. |
+| `--dns-default` | Use eligible provider DNS servers as the user's default DNS. |
+| `--dns-zones ZONES` | Use provider DNS for these comma-separated domain suffixes. |
+| `--non-interactive` | Read the supplied arguments without prompting. |
+
+Example:
+
+```sh
+wgfeel egress add office.conf
+wgfeel egress add --config-stdin < office.conf
+```
+
+<a id="wgfeel-egress-list"></a>
+
+### wgfeel egress list
+
+```text
+wgfeel egress list
+```
+
+List saved egress profiles and their placement.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel egress list
+```
+
+<a id="wgfeel-egress-show"></a>
+
+### wgfeel egress show
+
+```text
+wgfeel egress show [EGRESS_ID]
+```
+
+Show public provider parameters, allowed prefixes and placement.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel egress show eg_office
+```
+
+<a id="wgfeel-egress-replace"></a>
+
+### wgfeel egress replace
+
+```text
+wgfeel egress replace EGRESS_ID [FILE] [OPTIONS]
+```
+
+Replace the provider configuration under the same egress ID. Omit the name to preserve the current display name.
+
+Accepts the [connection options](#connection-options).
+
+| Argument / option | Description |
+| --- | --- |
+| `--config-file PATH` | Read one WireGuard provider profile from this file (16 KiB maximum). |
+| `--config-stdin` | Read the provider profile from standard input through EOF. This disables all prompts. |
+| `--name NAME` | Display name of the egress profile, up to 128 bytes. |
+| `--non-interactive` | Read the supplied arguments without prompting. |
+
+Example:
+
+```sh
+wgfeel egress replace eg_office office.conf
+```
+
+<a id="wgfeel-egress-node"></a>
+
+### wgfeel egress node
+
+```text
+wgfeel egress node [EGRESS_ID] [--node NODE_ID | --unassign]
+```
+
+Inspect placement or request a global attach, move or detach. A move can remain pending until the former node releases the profile.
+
+Accepts the [connection options](#connection-options).
+
+| Argument / option | Description |
+| --- | --- |
+| `--node NODE_ID` | Place the profile on this eligible entry node. |
+| `--unassign` | Detach the profile or cancel a pending destination. Requires confirmation at a terminal, defaulting to no. For unattended changes use the node placement REST endpoint with If-Match. |
+
+Example:
+
+```sh
+wgfeel egress node eg_office --node entry_b
+```
+
+<a id="wgfeel-egress-delete"></a>
+
+### wgfeel egress delete
+
+```text
+wgfeel egress delete [EGRESS_ID]
+```
+
+Delete a saved egress after confirmation at a terminal. Remove all user assignments and detach the profile first.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel egress delete eg_office
+```
+
+<a id="wgfeel-user-egress-list"></a>
+
+### wgfeel user egress list
+
+```text
+wgfeel user egress list [USER_ID]
+```
+
+List the user's egress assignments, placement, routes and DNS selection.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel user egress list alice
+```
+
+<a id="wgfeel-user-egress-set"></a>
+
+### wgfeel user egress set
+
+```text
+wgfeel user egress set [USER_ID] [EGRESS_ID] [OPTIONS]
+```
+
+Create or replace one assignment. Supply route intent; DNS defaults to none. An unassigned profile can be attached first using --node. Re-export device profiles after changing the assignment.
+
+Accepts the [connection options](#connection-options).
+
+| Argument / option | Description |
+| --- | --- |
+| `--node NODE_ID` | Place the profile on this eligible entry node. |
+| `--internet` | Grant the default route for each address family supported by the profile and its provider AllowedIPs. |
+| `--routes CIDRS` | Comma-separated explicit route prefixes for this assignment. |
+| `--dns-default` | Use eligible provider DNS servers as the user's default DNS. |
+| `--dns-zones ZONES` | Use provider DNS for these comma-separated domain suffixes. |
+| `--non-interactive` | Read the supplied arguments without prompting. |
+
+Example:
+
+```sh
+wgfeel user egress set alice eg_office --routes 10.40.0.0/16
+```
+
+<a id="wgfeel-user-egress-remove"></a>
+
+### wgfeel user egress remove
+
+```text
+wgfeel user egress remove [USER_ID] [EGRESS_ID]
+```
+
+Remove one assignment after confirmation at a terminal. Re-export the affected device profiles.
+
+Accepts the [connection options](#connection-options).
+
+Example:
+
+```sh
+wgfeel user egress remove alice eg_office
 ```

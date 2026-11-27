@@ -1,5 +1,8 @@
 //! Explicit private material boundary. Public configuration never serializes it.
-use crate::{DiskSecret, StoreError};
+use crate::{
+    DiskSecret, EgressKeys, StoreError,
+    egresses::{EgressSecrets, WriteEgressSecrets},
+};
 use serde::{Deserialize, Serialize};
 use wgfeel_core::{
     ClientId, DeviceId, DevicePrivateKey, MAX_DEVICES, MAX_GATEWAYS, MAX_NETWORKS,
@@ -9,12 +12,14 @@ const MAX_TENANTS: usize = MAX_GATEWAYS * MAX_NETWORKS;
 #[derive(Debug)]
 pub struct ManagementSecrets {
     devices: Vec<(ClientId, DeviceId, DevicePrivateKey)>,
+    egresses: EgressSecrets,
     tenants: Vec<(NodeId, NetworkId, TenantPrivateKey)>,
 }
 impl Default for ManagementSecrets {
     fn default() -> Self {
         Self {
             devices: Vec::with_capacity(MAX_DEVICES),
+            egresses: EgressSecrets::default(),
             tenants: Vec::with_capacity(MAX_TENANTS),
         }
     }
@@ -56,8 +61,34 @@ impl ManagementSecrets {
         self.tenants.push((node, network, key));
         Ok(())
     }
+    pub(crate) fn select_egress_keys(
+        &self,
+        projection: &wgfeel_core::GatewayProjection,
+    ) -> Result<crate::LocalEgressSecrets, StoreError> {
+        self.egresses.select(projection.owned_egresses())
+    }
+    pub fn replace_egress(
+        &mut self,
+        id: &wgfeel_core::EgressId,
+        keys: EgressKeys,
+    ) -> Result<bool, wgfeel_core::DomainError> {
+        self.egresses.replace(id, keys)
+    }
+    pub fn insert_egress(
+        &mut self,
+        id: wgfeel_core::EgressId,
+        keys: EgressKeys,
+    ) -> Result<(), wgfeel_core::DomainError> {
+        self.egresses.insert(id, keys)
+    }
     pub fn copy_owned(&self) -> Result<Self, StoreError> {
-        let mut result = Self::default();
+        let mut result = Self {
+            egresses: self
+                .egresses
+                .copy_owned()
+                .map_err(StoreError::InvalidConfig)?,
+            ..Self::default()
+        };
         for (client, device, key) in &self.devices {
             result.insert_device(
                 client.clone(),
@@ -75,6 +106,7 @@ impl ManagementSecrets {
         Ok(result)
     }
     pub fn retain_document(&mut self, document: &ManagementDocument) {
+        self.egresses.retain(document.routing().egresses());
         self.devices.retain(|(client, device, _)| {
             document.clients().iter().any(|owner| {
                 owner.id() == client && owner.devices().iter().any(|entry| entry.id() == device)
@@ -91,6 +123,7 @@ impl ManagementSecrets {
         });
     }
     pub(crate) fn validate(&self, document: &ManagementDocument) -> Result<(), StoreError> {
+        self.egresses.validate(document.routing().egresses())?;
         if self.devices.iter().any(|(client, device, _)| {
             !document.clients().iter().any(|owner| {
                 owner.id() == client && owner.devices().iter().any(|entry| entry.id() == device)
@@ -192,11 +225,14 @@ impl<'de> Deserialize<'de> for ManagementSecrets {
         struct Raw {
             devices: Devices,
             tenants: Tenants,
+            #[serde(default)]
+            egresses: EgressSecrets,
         }
         let raw = Raw::deserialize(de)?;
         Ok(Self {
             devices: raw.devices.0.devices,
             tenants: raw.tenants.0.tenants,
+            egresses: raw.egresses,
         })
     }
 }
@@ -219,8 +255,10 @@ impl Serialize for WriteSecrets<'_> {
         struct Wire<'a> {
             devices: Vec<Device<'a>>,
             tenants: Vec<Tenant<'a>>,
+            egresses: WriteEgressSecrets<'a>,
         }
         Wire {
+            egresses: WriteEgressSecrets(&self.0.egresses),
             devices: self
                 .0
                 .devices

@@ -21,6 +21,8 @@ mod api;
 mod enrollment;
 #[path = "support/mesh.rs"]
 mod mesh;
+#[path = "support/put.rs"]
+mod put;
 #[path = "support/token.rs"]
 mod token;
 struct Fixture(PathBuf);

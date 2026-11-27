@@ -1,13 +1,13 @@
 //! Main uses the same confined forwarding workers, DNS and mesh as children.
 //! The application owns authoritative storage and the external HTTP listener.
-use super::{BATCH, Timer, control, dns, mesh, receive, send, timers};
+use super::{BATCH, Timer, control, dns, egress, mesh, receive, send, timers};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
     time::{Duration, Instant},
 };
 use wgfeel_core::{ControlMode, GatewayProjection, NodeId, NodeKeys};
-use wgfeel_store::LocalTenants;
+use wgfeel_store::{LocalEgressSecrets, LocalTenants};
 use wgfeel_wireguard::{
     ContextId, Limits, MAX_DATAGRAM_SIZE, PacketBytes, PeerConfig, PeerId, UdpListener,
     worker::{LocalError, LocalEvent, LocalGateway, WorkerError},
@@ -58,6 +58,7 @@ fn spawn(
     projection: &GatewayProjection,
     key: &NodeKeys,
     tenants: &LocalTenants,
+    providers: &LocalEgressSecrets,
 ) -> Result<Candidate, &'static str> {
     if projection.control_mode() != ControlMode::Main {
         return Err("main forwarding requires its own authoritative projection");
@@ -66,13 +67,20 @@ fn spawn(
         .network_ids()
         .filter_map(|id| tenants.private_key(id).map(|key| (id, key)));
     let pin = projection.assignment().service_public_key();
+    providers
+        .validate(projection)
+        .map_err(|_| "invalid main provider keys")?;
+    let provider_keys = control::provider_keys(projection, providers);
     let gateway = match previous {
-        Some(previous) => previous.prepare_replacement(projection, pin, key, assigned),
-        None => LocalGateway::spawn_managed(
+        Some(previous) => {
+            previous.replace_with_egresses(projection, pin, key, assigned, provider_keys)
+        }
+        None => LocalGateway::spawn_with_egresses(
             projection,
             pin,
             key,
             assigned,
+            provider_keys,
             Limits::default(),
             control::options(),
         ),
@@ -93,6 +101,7 @@ pub struct MainForwarder {
     active: Candidate,
     pending: Option<Candidate>,
     mesh: mesh::Runtime,
+    egress: egress::Runtime,
     dns: dns::Runtime,
     timers: Vec<Timer>,
     controls: Vec<PeerConfig>,
@@ -112,13 +121,15 @@ impl MainForwarder {
         projection: &GatewayProjection,
         key: &NodeKeys,
         tenants: &LocalTenants,
+        providers: &LocalEgressSecrets,
     ) -> Result<Self, &'static str> {
         let socket = UdpListener::bind(listen).map_err(|_| "cannot bind main WireGuard socket")?;
-        let active = spawn(None, projection, key, tenants)?;
+        let active = spawn(None, projection, key, tenants, providers)?;
         let service_peers = service_peers(projection, &socket);
         Ok(Self {
             socket,
             mesh: mesh::Runtime::new(projection)?,
+            egress: egress::Runtime::new(&active.gateway),
             dns: dns::Runtime::default(),
             timers: timers(&active.gateway, true),
             active,
@@ -150,7 +161,11 @@ impl MainForwarder {
         projection: &GatewayProjection,
         key: &NodeKeys,
         tenants: &LocalTenants,
+        providers: &LocalEgressSecrets,
     ) -> Result<(), &'static str> {
+        providers
+            .validate(projection)
+            .map_err(|_| "invalid main provider keys")?;
         let current = self.active.gateway.projection();
         if projection.recipient() != current.recipient()
             || projection.assignment().service_public_key()
@@ -162,16 +177,34 @@ impl MainForwarder {
         {
             return Err("main forwarding identity or revision changed unexpectedly");
         }
-        if projection == current
-            || self.pending.as_ref().is_some_and(|pending| {
-                pending.gateway.projection().generation() >= projection.generation()
-            })
-        {
-            return Ok(());
+        if projection == current {
+            return self
+                .active
+                .gateway
+                .provider_keys_match(control::provider_keys(projection, providers))
+                .then_some(())
+                .ok_or("conflicting provider keys for applied revision");
+        }
+        if let Some(pending) = &self.pending {
+            if pending.gateway.projection().generation() > projection.generation() {
+                return Ok(());
+            }
+            if pending.gateway.projection().generation() == projection.generation() {
+                return (pending.gateway.projection() == projection
+                    && pending
+                        .gateway
+                        .provider_keys_match(control::provider_keys(projection, providers)))
+                .then_some(())
+                .ok_or("conflicting pending revision");
+            }
         }
         if self.pending.is_none()
             && self.pending_controls.is_none()
             && self.active.gateway.can_replace_projection(projection)
+            && self
+                .active
+                .gateway
+                .provider_keys_match(control::provider_keys(projection, providers))
         {
             // Prepare all fallible routing state before publishing the revision.
             // A policy-only update keeps crypto sessions, but not old mesh ACLs,
@@ -182,10 +215,18 @@ impl MainForwarder {
                 .replace_projection(projection)
                 .map_err(|_| "cannot apply main forwarding policy")?;
             self.mesh = mesh;
+            self.egress.configure(&self.active.gateway);
+            self.outgoing.clear();
             self.dns.reset();
             return Ok(());
         }
-        self.pending = Some(spawn(Some(&self.active.gateway), projection, key, tenants)?);
+        self.pending = Some(spawn(
+            Some(&self.active.gateway),
+            projection,
+            key,
+            tenants,
+            providers,
+        )?);
         Ok(())
     }
     pub fn control_peers(&mut self, peers: Vec<PeerConfig>) {
@@ -193,6 +234,15 @@ impl MainForwarder {
     }
     pub fn control_transport(&mut self) -> std::io::Result<wgfeel_wireguard::UdpTransport> {
         self.socket.control_transport()
+    }
+    pub fn peer_identity(&self, id: &NodeId) -> Option<&wgfeel_core::DevicePublicKey> {
+        self.active
+            .gateway
+            .projection()
+            .mesh()
+            .iter()
+            .find(|node| node.recipient() == id)
+            .map(|node| node.service_public_key())
     }
     pub fn endpoint(&self, peer: &NodeId) -> Option<SocketAddr> {
         self.active
@@ -219,6 +269,9 @@ impl MainForwarder {
         }
         for _ in 0..BATCH {
             match self.active.gateway.poll() {
+                Some(LocalEvent::ProviderOutput(datagram)) => {
+                    self.egress.send(&mut self.active.gateway, datagram)
+                }
                 Some(LocalEvent::Network(datagram)) => send(&self.socket, datagram),
                 Some(event @ (LocalEvent::Mesh { .. } | LocalEvent::MeshOutput { .. })) => {
                     self.mesh
@@ -260,6 +313,7 @@ impl MainForwarder {
                     generation,
                     ..
                 }) => {
+                    self.egress.failed(&context);
                     if context == ContextId::Service {
                         self.control_timer.failed = true;
                     }
@@ -306,6 +360,8 @@ impl MainForwarder {
                             self.pending = None;
                             self.active.remaining = 0;
                             self.mesh = mesh;
+                            self.egress.configure(&self.active.gateway);
+                            self.outgoing.clear();
                             self.dns.reset();
                             self.timers = timers(&self.active.gateway, true);
                             self.service_peers =
@@ -383,6 +439,7 @@ impl MainForwarder {
             }
             self.outgoing.pop_front();
         }
+        self.egress.poll(&mut self.active.gateway);
         self.mesh.poll(
             &mut self.active.gateway,
             &self.socket,

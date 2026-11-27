@@ -3,6 +3,8 @@ use std::path::Path;
 use wgfeel_core::{DevicePublicKey, DomainError, ManagementChangeError, NodeId};
 use wgfeel_store::{ManagementStore, StoreError};
 
+mod egress;
+pub use egress::preview_egress_profile;
 mod enrollment;
 mod enrollment_api;
 mod models;
@@ -69,6 +71,16 @@ impl ManagementService {
             .ok_or(StoreError::IdentityChanged)?;
         if node.service_public_key() != key {
             return Err(StoreError::IdentityChanged);
+        }
+        if state
+            .document()
+            .routing()
+            .egress_policy()
+            .reservations
+            .iter()
+            .any(|r| r.former_node == id)
+        {
+            self.store.acknowledge_release(&id, key, generation)?;
         }
         self.delivered.insert(id, generation);
         Ok(())
@@ -163,26 +175,46 @@ impl wgfeel_protocol::Handler for ManagementService {
 
 struct ApiError(u16, &'static str);
 impl From<DomainError> for ApiError {
-    fn from(_: DomainError) -> Self {
-        Self(422, "invalid_configuration")
+    fn from(error: DomainError) -> Self {
+        match error {
+            DomainError::DuplicateEgressPrefix => Self(409, "duplicate_egress_prefix"),
+            DomainError::ConflictingDnsSelection => Self(409, "conflicting_dns_selection"),
+            DomainError::NodeOutOfScope => Self(409, "node_out_of_scope"),
+            DomainError::EgressNodeRequired => Self(409, "egress_node_required"),
+            DomainError::EgressMovePending => Self(409, "egress_move_pending"),
+            DomainError::EgressInUse => Self(409, "egress_in_use"),
+            DomainError::NodeOwnsEgresses => Self(409, "node_owns_egresses"),
+            DomainError::EgressKeyPendingWithdrawal => Self(409, "egress_key_pending_withdrawal"),
+            DomainError::InvalidEgress => Self(422, "invalid_egress"),
+            _ => Self(422, "invalid_configuration"),
+        }
     }
 }
 fn storage_error(error: StoreError) -> ApiError {
     match error {
         StoreError::RevisionConflict => ApiError(412, "revision_conflict"),
+        StoreError::InvalidConfig(error) => error.into(),
         StoreError::WithdrawalPending => ApiError(409, "withdrawal_pending"),
         StoreError::CommitUncertain => ApiError(503, "commit_uncertain_reload_required"),
         _ => ApiError(503, "storage_unavailable"),
+    }
+}
+impl From<ManagementChangeError> for ApiError {
+    fn from(error: ManagementChangeError) -> Self {
+        change_error(error)
     }
 }
 fn change_error(error: ManagementChangeError) -> ApiError {
     use ManagementChangeError::*;
     match error {
         RevisionConflict => ApiError(412, "revision_conflict"),
-        UnknownClient | UnknownDevice | UnknownGateway => ApiError(404, "not_found"),
+        UnknownClient | UnknownDevice | UnknownGateway | UnknownEgress => {
+            ApiError(404, "not_found")
+        }
         DuplicateClient | DuplicateDevice | Invalid(DomainError::DuplicateGatewayId) => {
             ApiError(409, "already_exists")
         }
+        Invalid(error) => error.into(),
         _ => ApiError(422, "invalid_change"),
     }
 }

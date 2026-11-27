@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 pub const MAX_GATEWAYS: usize = 150;
 pub const MAX_NODE_ENDPOINTS: usize = 16;
 pub const MAX_PROJECTION_BYTES: usize = crate::MAX_CONFIG_BYTES + 65_536;
-pub const PROJECTION_VERSION: u32 = 1;
+pub const PROJECTION_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct TenantKeyAssignment {
@@ -194,6 +194,7 @@ pub struct ManagementConfig {
     management: NodeId,
     config: Config,
     assignments: Vec<GatewayAssignment>,
+    egress_policy: crate::EgressPolicy,
 }
 
 impl ManagementConfig {
@@ -243,7 +244,71 @@ impl ManagementConfig {
             management,
             config,
             assignments,
+            egress_policy: Default::default(),
         })
+    }
+
+    pub fn egresses(&self) -> &[crate::EgressProfile] {
+        &self.egress_policy.profiles
+    }
+
+    pub fn egress_policy(&self) -> &crate::EgressPolicy {
+        &self.egress_policy
+    }
+    pub fn with_egress_policy(mut self, policy: crate::EgressPolicy) -> Result<Self, DomainError> {
+        policy.validate(&self)?;
+        let egresses = &policy.profiles;
+        if egresses.is_empty() && policy.reservations.is_empty() {
+            self.egress_policy = policy;
+            return Ok(self);
+        }
+        let mut ids = BTreeSet::new();
+        let mut local_keys: BTreeSet<_> = self
+            .config
+            .networks()
+            .iter()
+            .flat_map(|n| n.devices())
+            .map(|d| d.public_key().x25519_coordinate())
+            .collect();
+        for node in &self.assignments {
+            local_keys.extend(
+                node.transport_public_keys()
+                    .map(DevicePublicKey::x25519_coordinate),
+            );
+            local_keys.extend(
+                node.tenants()
+                    .iter()
+                    .map(|tenant| tenant.public_key().x25519_coordinate()),
+            );
+        }
+        if policy
+            .reservations
+            .iter()
+            .any(|r| local_keys.contains(r.interface_public_key.as_bytes()))
+        {
+            return Err(DomainError::EgressKeyPendingWithdrawal);
+        }
+        for profile in egresses {
+            if !ids.insert(&profile.id)
+                || !local_keys.insert(*profile.interface_public_key.as_bytes())
+            {
+                return Err(DomainError::InvalidEgress);
+            }
+        }
+        if egresses
+            .iter()
+            .any(|p| local_keys.contains(p.peer_public_key.as_bytes()))
+        {
+            return Err(DomainError::InvalidEgress);
+        }
+        if egresses
+            .iter()
+            .any(|p| policy.reservation(&p.peer_public_key).is_some())
+        {
+            return Err(DomainError::EgressKeyPendingWithdrawal);
+        }
+        self.egress_policy = policy;
+        Ok(self)
     }
 
     /// Retains every rule relevant to the assigned scope and its direct grant
@@ -254,11 +319,13 @@ impl ManagementConfig {
             .iter()
             .find(|assignment| assignment.recipient == *recipient)
             .ok_or(DomainError::UnknownGateway)?;
-        GatewayProjection::new(
+        let mut projection = GatewayProjection::new(
             self.management.clone(),
             assignment.clone(),
             self.config.project_networks(&assignment.networks)?,
-        )
+        )?;
+        projection.egress = crate::ProjectionEgress::for_node(&self.egress_policy, assignment);
+        Ok(projection)
     }
 
     pub fn project_mesh_for(&self, recipient: &NodeId) -> Result<GatewayProjection, DomainError> {
@@ -293,6 +360,7 @@ pub struct GatewayProjection {
     config: Config,
     mesh: Option<Vec<GatewayAssignment>>,
     revoked: bool,
+    pub(crate) egress: crate::ProjectionEgress,
 }
 
 impl GatewayProjection {
@@ -323,6 +391,7 @@ impl GatewayProjection {
             config,
             mesh: None,
             revoked: false,
+            egress: Default::default(),
         })
     }
 
@@ -490,9 +559,14 @@ impl GatewayProjection {
         }
         let raw: RawProjection<'_> =
             serde_json::from_str(input).map_err(|_| DomainError::InvalidJson)?;
+        let egress = match (raw.projection_version, raw.egress) {
+            (1 | 2, None) => Default::default(),
+            (3, Some(policy)) => policy,
+            _ => return Err(DomainError::UnsupportedSchemaVersion),
+        };
         let mesh = match (raw.projection_version, raw.mesh, raw.revoked) {
-            (1, None, None) => None,
-            (2, Some(mesh), Some(revoked)) => Some((
+            (1 | 3, None, None) => None,
+            (2 | 3, Some(mesh), Some(revoked)) => Some((
                 mesh.into_iter()
                     .map(RawAssignment::validate)
                     .collect::<Result<Vec<_>, _>>()?,
@@ -506,16 +580,20 @@ impl GatewayProjection {
             assignment,
             Config::from_json(raw.config.get())?,
         )?;
-        match mesh {
-            Some((nodes, revoked)) => projection.with_mesh(nodes, revoked),
-            None => Ok(projection),
-        }
+        let mut projection = match mesh {
+            Some((nodes, revoked)) => projection.with_mesh(nodes, revoked)?,
+            None => projection,
+        };
+        projection.egress = egress;
+        projection.egress.validate(&projection)?;
+        Ok(projection)
     }
 
     pub fn to_json(&self) -> Result<String, DomainError> {
         #[derive(Serialize)]
         struct WireProjection<'a> {
             projection_version: u32,
+            egress: &'a crate::ProjectionEgress,
             management_id: &'a NodeId,
             assignment: &'a GatewayAssignment,
             config: &'a RawValue,
@@ -530,11 +608,8 @@ impl GatewayProjection {
         }
         let config = RawValue::from_string(config).map_err(|_| DomainError::InvalidJson)?;
         let encoded = serde_json::to_string(&WireProjection {
-            projection_version: if self.mesh.is_some() {
-                2
-            } else {
-                PROJECTION_VERSION
-            },
+            projection_version: PROJECTION_VERSION,
+            egress: &self.egress,
             management_id: &self.management_id,
             assignment: &self.assignment,
             config: &config,
@@ -564,6 +639,8 @@ fn validate_membership(assignment: &GatewayAssignment, config: &Config) -> Resul
 #[serde(deny_unknown_fields)]
 struct RawProjection<'a> {
     projection_version: u64,
+    #[serde(default, deserialize_with = "present")]
+    egress: Option<crate::ProjectionEgress>,
     management_id: String,
     assignment: RawAssignment,
     #[serde(borrow)]
@@ -573,7 +650,7 @@ struct RawProjection<'a> {
     #[serde(default, deserialize_with = "present")]
     revoked: Option<bool>,
 }
-fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     de: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(de).map(Some)

@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -18,6 +18,9 @@ const USAGE: &str = "usage:
   wgfeel user show [ID]
   wgfeel user add [NAME]
   wgfeel user remove [--id ID]
+
+  wgfeel egress [add|list|show|node|replace|delete]
+  wgfeel user egress list|set|remove
 
   wgfeel device show [ID]
   wgfeel device add [--user ID] [--name NAME]
@@ -36,6 +39,7 @@ Uses /opt/wgfeel automatically. Deletions require confirmation with y.
 See wgfeel --help for all options.";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Default)]
 struct Options {
     flags: BTreeMap<String, String>,
     positional: Vec<String>,
@@ -48,7 +52,15 @@ impl Options {
         while let Some(value) = args.next() {
             let value = value.to_str().ok_or(USAGE)?;
             if value.starts_with("--") {
-                let next = args.next().and_then(|arg| arg.to_str()).ok_or(USAGE)?;
+                let next = match value {
+                    "--config-stdin" | "--internet" | "--dns-default" | "--unassign"
+                    | "--non-interactive" => "",
+                    _ => args
+                        .next()
+                        .and_then(|arg| arg.to_str())
+                        .filter(|v| !v.starts_with("--"))
+                        .ok_or(USAGE)?,
+                };
                 if flags.insert(value.into(), next.into()).is_some() {
                     return Err("duplicate command option");
                 }
@@ -274,11 +286,13 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
     run_installed(args, &wgfeel_host::default_install_dir())
 }
 fn run_installed(args: &[OsString], installation: &Path) -> Result<(), &'static str> {
+    let terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
     run_with_io(
         args,
         installation,
         &mut io::stdin().lock(),
         &mut io::stdout().lock(),
+        terminal,
     )
 }
 fn run_with_io(
@@ -286,6 +300,7 @@ fn run_with_io(
     installation: &Path,
     input: &mut dyn io::BufRead,
     out: &mut dyn Write,
+    terminal: bool,
 ) -> Result<(), &'static str> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         let help = wgfeel_host::help::requested(args).ok_or(USAGE)?;
@@ -298,8 +313,8 @@ fn run_with_io(
     let call = |method: &str, target: &str, revision: Option<u64>, body: &[u8]| {
         connection.call(method, target, revision, body, None)
     };
-    if kind == "user" || kind == "device" {
-        return interactive::run(kind, options, &call, input, out);
+    if matches!(kind, "user" | "device" | "egress") {
+        return interactive::run(kind, options, &call, input, out, terminal);
     }
     let operation = if options.positional.is_empty() {
         return Err(USAGE);

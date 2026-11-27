@@ -118,7 +118,7 @@ impl Builder {
             "info": {
                 "title": "wgfeel administrative REST API",
                 "version": env!("CARGO_PKG_VERSION"),
-                "description": "HTTP/1.1 administrative API on main. POST requires Content-Type: application/json and Content-Length, including requests with an empty body."
+                "description": "HTTP/1.1 administrative API on main. POST and PUT require Content-Type: application/json and Content-Length, including requests with an empty body."
             },
             "security": [{"adminBearer": []}],
             "paths": api.paths,
@@ -161,9 +161,14 @@ impl Builder {
             },
             "content": {(T::MEDIA_TYPE): {"schema": T::schema(&mut self.outputs)}}
         }));
+        if kind == Kind::Placement {
+            let mut accepted = responses["200"].clone();
+            accepted["description"] = json!("Awaiting authenticated release by the former node.");
+            responses.insert("202".into(), accepted);
+        }
         for &(code, _) in ERRORS {
             let relevant = match code {
-                411 | 415 => kind.method() == "POST",
+                411 | 415 => matches!(kind.method(), "POST" | "PUT"),
                 412 => kind != Kind::Read,
                 428 => kind.requires_revision(),
                 404 | 409 | 422 => domain_errors.contains(&code),
@@ -231,7 +236,7 @@ const ERRORS: &[(u16, &str)] = &[
     (411, "Content-Length is required."),
     (412, "The supplied revision is stale."),
     (413, "The request exceeds the size limit."),
-    (415, "POST requires application/json."),
+    (415, "POST and PUT require application/json."),
     (422, "The requested configuration is invalid."),
     (428, "The If-Match revision is required."),
     (429, "Request or invitation limit reached."),

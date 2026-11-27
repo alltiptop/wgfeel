@@ -4,7 +4,16 @@ use gotatun::packet::{Decoder, Ipv4, Ipv4Decoder, Ipv4Options, Ipv6, Ipv6Decoder
 /// Check framing before the upstream packet allocation/parser. Returns whether
 /// this packet can add a source to the upstream handshake rate limiter.
 pub(crate) fn datagram(bytes: &[u8]) -> Result<bool, WireGuardError> {
-    if bytes.len() > MAX_DATAGRAM_SIZE {
+    datagram_for(bytes, false)
+}
+pub(crate) fn datagram_for(bytes: &[u8], external: bool) -> Result<bool, WireGuardError> {
+    if bytes.len()
+        > if external {
+            crate::MAX_PROVIDER_DATAGRAM_SIZE
+        } else {
+            MAX_DATAGRAM_SIZE
+        }
+    {
         return Err(WireGuardError::PacketTooLarge);
     }
     if bytes.len() < 4 || bytes[1..4] != [0; 3] {
@@ -20,7 +29,13 @@ pub(crate) fn datagram(bytes: &[u8]) -> Result<bool, WireGuardError> {
 
 /// Public routing hint only. An initiation carries no receiver index.
 pub(crate) fn receiver_index(bytes: &[u8]) -> Result<Option<u32>, WireGuardError> {
-    datagram(bytes)?;
+    receiver_index_for(bytes, false)
+}
+pub(crate) fn receiver_index_for(
+    bytes: &[u8],
+    external: bool,
+) -> Result<Option<u32>, WireGuardError> {
+    datagram_for(bytes, external)?;
     if bytes[0] == 1 {
         return Ok(None);
     }
@@ -35,7 +50,20 @@ pub(crate) fn receiver_index(bytes: &[u8]) -> Result<Option<u32>, WireGuardError
 /// Upstream IP framing validation, including IPv4 options. Checksums, source
 /// ownership, extensions and fragment policy belong to the forwarding layer.
 pub(crate) fn ip_length(bytes: &[u8], padded: bool) -> Result<usize, WireGuardError> {
-    if bytes.len() > MAX_PLAINTEXT_SIZE {
+    ip_length_for(bytes, padded, false)
+}
+pub(crate) fn ip_length_for(
+    bytes: &[u8],
+    padded: bool,
+    external: bool,
+) -> Result<usize, WireGuardError> {
+    if bytes.len()
+        > if external {
+            crate::MAX_PROVIDER_PLAINTEXT
+        } else {
+            MAX_PLAINTEXT_SIZE
+        }
+    {
         return Err(WireGuardError::PacketTooLarge);
     }
     let length = match bytes.first().map(|b| b >> 4) {

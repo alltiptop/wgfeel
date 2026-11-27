@@ -256,7 +256,13 @@ impl Router {
         source: SocketAddr,
         bytes: &[u8],
     ) -> Result<Verification, AdmissionError> {
-        let handshake = framing::datagram(bytes).map_err(AdmissionError::Rejected)?;
+        let handshake = framing::datagram_for(
+            bytes,
+            self.contexts
+                .get(slot)
+                .is_some_and(|c| matches!(c.id, ContextId::External(_))),
+        )
+        .map_err(AdmissionError::Rejected)?;
         let context = self
             .contexts
             .get_mut(slot)

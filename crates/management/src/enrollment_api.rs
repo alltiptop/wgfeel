@@ -1,7 +1,5 @@
 use super::models::{InvitationOptions, IssuedInvitation};
-use super::{
-    ApiError, ManagementService, Request, Response, change_error, provision, storage_error,
-};
+use super::{ApiError, ManagementService, Request, Response, provision, storage_error};
 use std::{
     net::SocketAddr,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -203,11 +201,8 @@ impl ManagementService {
             let generation = if let Some(change) = change {
                 let expected = state.document().routing().generation();
                 let mut secrets = state.secrets().copy_owned().map_err(storage_error)?;
-                let next = state
-                    .document()
-                    .apply_change(expected, &change)
-                    .map_err(change_error)?;
-                let next = provision::reconcile(next, &change, &mut secrets)?;
+                let next =
+                    provision::apply_change(state.document(), expected, &change, &mut secrets)?;
                 self.store
                     .commit_with_verifier(
                         &next,

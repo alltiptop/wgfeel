@@ -195,10 +195,10 @@ pub fn decode_request_with_limit(
         return Err(HttpError(400));
     }
     let method = parsed.method.ok_or(HttpError(400))?;
-    if method == "POST" && content_type != Some("application/json") {
+    if matches!(method, "POST" | "PUT") && content_type != Some("application/json") {
         return Err(HttpError(415));
     }
-    if method == "POST" && length.is_none() {
+    if matches!(method, "POST" | "PUT") && length.is_none() {
         return Err(HttpError(411));
     }
     let length = match length {
@@ -325,6 +325,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn put_requires_json_framing_before_dispatch() {
+        for (headers, status) in [
+            ("Content-Length: 2\r\n", 415),
+            ("Content-Type: application/json\r\n", 411),
+        ] {
+            let input = format!(
+                "PUT /api/v1/egresses/id/node HTTP/1.1\r\nHost: local\r\n{headers}\r\n{{}}"
+            );
+            assert!(
+                matches!(decode_request(input.as_bytes()),Err(HttpError(code)) if code==status)
+            );
+        }
+    }
     #[test]
     fn bounds_declared_body_and_partial_headers_without_waiting_for_payload() {
         let input = format!(

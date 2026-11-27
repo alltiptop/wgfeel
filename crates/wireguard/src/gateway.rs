@@ -14,7 +14,6 @@ use gotatun::{
     x25519::{PublicKey, StaticSecret},
 };
 use std::{
-    cmp::Ordering,
     fmt,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -203,8 +202,18 @@ impl Gateway {
                     tunnel: Tunn::new(
                         secret.clone(),
                         PublicKey::from(*peer.public_key.as_bytes()),
-                        None,
-                        None,
+                        match &config.private_key {
+                            crate::PrivateKey::External { psk, .. } => {
+                                psk.as_ref().map(|k| *k.expose_bytes())
+                            }
+                            _ => None,
+                        },
+                        match &config.private_key {
+                            crate::PrivateKey::External { keepalive, .. } => {
+                                keepalive.map(|k| k.get())
+                            }
+                            _ => None,
+                        },
                         indices.clone(),
                         rate_limiter.clone(),
                     ),
@@ -269,7 +278,7 @@ impl Gateway {
             }
             let raw = peer.public_key.as_bytes();
             if raw == context.public_key.as_bytes()
-                || !canonical_public_key(raw)
+                || !wgfeel_core::canonical_public_key(raw)
                 || !context
                     .secret
                     .diffie_hellman(&PublicKey::from(*raw))
@@ -780,7 +789,12 @@ pub(crate) fn validate_context_configs(
         .count();
     if limits.handshake_limit_per_ip > 1000
         || tenant_count > MAX_TENANTS
-        || configs.len() > MAX_TENANTS + 2
+        || configs
+            .iter()
+            .filter(|c| matches!(c.id, ContextId::External(_)))
+            .count()
+            > wgfeel_core::MAX_EGRESSES_PER_NODE
+        || configs.len() > MAX_TENANTS + 2 + wgfeel_core::MAX_EGRESSES_PER_NODE
     {
         return Err(WireGuardError::InvalidConfiguration);
     }
@@ -791,6 +805,9 @@ pub(crate) fn validate_context_configs(
     for (i, config) in configs.iter().enumerate() {
         if configs[..i].iter().any(|other| other.id == config.id) {
             return Err(WireGuardError::DuplicateContext);
+        }
+        if matches!(config.id, ContextId::External(_)) && config.peers.len() != 1 {
+            return Err(WireGuardError::InvalidConfiguration);
         }
         let mesh = config
             .peers
@@ -837,6 +854,7 @@ pub(crate) fn validate_context_configs(
                 (&config.id, &peer.id),
                 (ContextId::Tenant(_), PeerId::Device(_) | PeerId::Gateway(_))
                     | (ContextId::Service | ContextId::Gateway, PeerId::Node(_))
+                    | (ContextId::External(_), PeerId::Provider)
             ) {
                 return Err(WireGuardError::InvalidConfiguration);
             }
@@ -848,7 +866,7 @@ pub(crate) fn validate_context_configs(
             }
             let raw = peer.public_key.as_bytes();
             if raw == public.as_bytes()
-                || !canonical_public_key(raw)
+                || !wgfeel_core::canonical_public_key(raw)
                 || !secret
                     .diffie_hellman(&PublicKey::from(*raw))
                     .was_contributory()
@@ -903,12 +921,6 @@ fn datagram(event: Event, destination: SocketAddr) -> DatagramEvent {
     }
 }
 
-fn canonical_public_key(key: &[u8; 32]) -> bool {
-    let mut modulus = [0xff; 32];
-    modulus[0] = 0xed;
-    modulus[31] = 0x7f;
-    key.iter().rev().cmp(modulus.iter().rev()) == Ordering::Less
-}
 fn network(context: &ContextId, peer: &PeerId, packet: WgKind) -> Event {
     let packet: Packet = packet.into();
     Event::Network {
@@ -928,8 +940,9 @@ fn event(
         TunnResult::WriteToNetwork(packet) => Ok(Some(network(context, peer, packet))),
         TunnResult::WriteToTunnel(packet) if packet.is_empty() => Ok(None),
         TunnResult::WriteToTunnel(mut packet) => {
-            let bytes = framing::ip_length(&packet, true)
-                .map(|length| PacketBytes(packet[..length].to_vec()));
+            let bytes =
+                framing::ip_length_for(&packet, true, matches!(context, ContextId::External(_)))
+                    .map(|length| PacketBytes(packet[..length].to_vec()));
             packet.buf_mut().as_mut().zeroize();
             Ok(Some(Event::Plaintext {
                 context: context.clone(),

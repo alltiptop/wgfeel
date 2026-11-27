@@ -303,7 +303,7 @@ fn commits_use_hashed_auth_and_explicit_api_configuration_preserves_complete_mat
         .unwrap();
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap()).unwrap();
-    assert_eq!(json["management_storage_version"], 6);
+    assert_eq!(json["management_storage_version"], 7);
     assert!(json.get("api").is_none());
     store
         .commit_with_api(
@@ -322,7 +322,7 @@ fn commits_use_hashed_auth_and_explicit_api_configuration_preserves_complete_mat
     );
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap()).unwrap();
-    assert_eq!(json["management_storage_version"], 6);
+    assert_eq!(json["management_storage_version"], 7);
     assert_eq!(
         json["api"],
         serde_json::json!({"listen":"0.0.0.0:51820","admin_public_key":vec![181;32]})
@@ -466,7 +466,7 @@ fn all_six_changes_and_credential_rotation_preserve_settings_without_public_proj
         let json: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap())
                 .unwrap();
-        assert_eq!(json["management_storage_version"], 6);
+        assert_eq!(json["management_storage_version"], 7);
         let public = candidate.to_json().unwrap();
         assert!(!public.contains("\"api\""));
         assert!(!public.contains("admin_public_key"));

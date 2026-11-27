@@ -13,7 +13,7 @@ pub fn request(state: &Path, method: &str, path: &str, body: &Value) -> Response
     } else {
         Some(get(state, "/api/v1/users").generation.unwrap())
     };
-    let bytes = if method == "POST" {
+    let bytes = if matches!(method, "POST" | "PUT") {
         serde_json::to_vec(body).unwrap()
     } else {
         Vec::new()
@@ -30,6 +30,20 @@ fn exchange(
     revision: Option<u64>,
     body: &[u8],
 ) -> Response {
+    let revision = revision.map(|n| format!("\"{n}\""));
+    unix_bytes(
+        state,
+        &http::encode_request(Request {
+            method,
+            target: path,
+            authorization: None,
+            if_match: revision.as_deref(),
+            body,
+        })
+        .unwrap(),
+    )
+}
+pub(super) fn unix_bytes(state: &Path, request: &[u8]) -> Response {
     let mut stream = UnixStream::connect(state.join("api.sock")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -37,19 +51,7 @@ fn exchange(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let revision = revision.map(|n| format!("\"{n}\""));
-    stream
-        .write_all(
-            &http::encode_request(Request {
-                method,
-                target: path,
-                authorization: None,
-                if_match: revision.as_deref(),
-                body,
-            })
-            .unwrap(),
-        )
-        .unwrap();
+    stream.write_all(request).unwrap();
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     loop {
         let mut buffer = zeroize::Zeroizing::new([0; 8192]);

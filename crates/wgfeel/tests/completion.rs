@@ -101,6 +101,24 @@ fn dynamic_ids_are_read_only_and_display_only_public_names() {
             "n1\tserver1\n",
         ),
         (
+            vec!["user", "egress", "set", "alice", "eg_"],
+            "/api/v1/egresses",
+            r#"{"egresses":[{"name":"Corporate","id":"eg_office","private_key":"must-not-print"}]}"#,
+            "eg_office\tCorporate\n",
+        ),
+        (
+            vec!["egress", "add", "--node", "n"],
+            "/api/v1/gateways",
+            r#"{"gateways":[{"recipient":"n1","hostname":"server1","traffic":"entry","endpoint":"192.0.2.1:51820"},{"recipient":"n2","traffic":"relay","endpoint":"192.0.2.2:51820"},{"recipient":"n3","traffic":"entry","endpoint":null}]}"#,
+            "n1\tserver1\n",
+        ),
+        (
+            vec!["egress", "add", "--users", "u1,u"],
+            "/api/v1/users",
+            r#"{"users":[{"id":"u1","name":"Alice","devices":[]},{"id":"u2","name":"Bob","devices":[]}]}"#,
+            "u1,u2\tBob\n",
+        ),
+        (
             vec!["device", "add", "--user", "u"],
             "/api/v1/users",
             r#"{"users":[{"id":"u1","name":"Alice","devices":[]}]}"#,

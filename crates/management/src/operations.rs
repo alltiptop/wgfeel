@@ -1,6 +1,4 @@
-use super::{
-    ApiError, ManagementService, change_error, generated_id, models::*, provision, storage_error,
-};
+use super::{ApiError, ManagementService, generated_id, models::*, provision, storage_error};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use wgfeel_core::*;
 use wgfeel_store::{ManagementSecrets, StoredManagement};
@@ -9,6 +7,7 @@ pub(super) struct Context<'a> {
     pub service: &'a mut ManagementService,
     pub state: &'a StoredManagement,
     pub revision: u64,
+    pub status: Option<u16>,
 }
 
 impl<'a> Context<'a> {
@@ -25,7 +24,7 @@ impl<'a> Context<'a> {
     pub fn get_user(&self, user: &str) -> Result<User<'a>, ApiError> {
         Ok(user_view(self.state.document(), self.user(user)?))
     }
-    fn user(&self, id: &str) -> Result<&'a Client, ApiError> {
+    pub(super) fn user(&self, id: &str) -> Result<&'a Client, ApiError> {
         self.state
             .document()
             .clients()
@@ -200,20 +199,37 @@ impl<'a> Context<'a> {
         })
     }
 
-    fn change(
+    pub(super) fn change(
         &mut self,
         build: impl FnOnce(
             &ManagementDocument,
             &mut ManagementSecrets,
         ) -> Result<(ManagementChange, String), ApiError>,
     ) -> Result<ChangeReceipt, ApiError> {
+        self.change_document(build).map(|(receipt, _)| receipt)
+    }
+
+    pub(super) fn change_document(
+        &mut self,
+        build: impl FnOnce(
+            &ManagementDocument,
+            &mut ManagementSecrets,
+        ) -> Result<(ManagementChange, String), ApiError>,
+    ) -> Result<(ChangeReceipt, ManagementDocument), ApiError> {
         let document = self.state.document();
         let mut secrets = self.state.secrets().copy_owned().map_err(storage_error)?;
         let (change, id) = build(document, &mut secrets)?;
-        let next = document
-            .apply_change(self.revision, &change)
-            .map_err(change_error)?;
-        let next = provision::reconcile(next, &change, &mut secrets)?;
+        let next = provision::apply_change(document, self.revision, &change, &mut secrets)?;
+        if next.routing().generation() == self.revision {
+            return Ok((
+                ChangeReceipt {
+                    id,
+                    generation: self.revision,
+                    distribution: ChangeDistribution::Pending,
+                },
+                next,
+            ));
+        }
         self.service
             .store
             .commit_with_verifier(
@@ -225,11 +241,14 @@ impl<'a> Context<'a> {
             )
             .map_err(storage_error)?;
         self.revision = next.routing().generation();
-        Ok(ChangeReceipt {
-            id,
-            generation: self.revision,
-            distribution: ChangeDistribution::Pending,
-        })
+        Ok((
+            ChangeReceipt {
+                id,
+                generation: self.revision,
+                distribution: ChangeDistribution::Pending,
+            },
+            next,
+        ))
     }
 }
 
@@ -237,6 +256,7 @@ fn user_view<'a>(document: &ManagementDocument, client: &'a Client) -> User<'a> 
     User {
         id: client.id(),
         name: client.name(),
+        egresses: super::egress::assignment_list(document, client.id()).egresses,
         suspended: document
             .routing()
             .config()
@@ -266,6 +286,7 @@ fn gateway_view<'a>(
         endpoints: gateway.endpoints(),
         hostname: gateway.hostname(),
         auto_users: gateway.auto_networks(),
+        traffic: gateway.traffic(),
         users: gateway.networks().iter().map(owner).collect(),
         tenants: gateway
             .tenants()

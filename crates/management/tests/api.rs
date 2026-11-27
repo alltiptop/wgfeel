@@ -17,6 +17,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
+        Self::with_document(&initial())
+    }
+    fn with_document(document: &ManagementDocument) -> Self {
         let root = std::env::temp_dir().join(format!(
             "wgfeel-management-api-{}-{}",
             std::process::id(),
@@ -27,7 +30,7 @@ impl Fixture {
         let fixture = Self(root);
         let mut store = ManagementStore::initialize(&fixture.path()).unwrap();
         store
-            .commit(&initial(), &node_key(), &credential(211), None)
+            .commit(document, &node_key(), &credential(211), None)
             .unwrap();
         fixture
     }
@@ -536,11 +539,11 @@ fn authenticated_reads_are_public_exact_and_do_not_mutate_the_snapshot() {
     let users = expected
         .clients()
         .iter()
-        .map(|client| serde_json::json!({"id":client.id(), "name":client.name(), "suspended":false, "devices":client.devices()}))
+        .map(|client| serde_json::json!({"id":client.id(), "name":client.name(), "suspended":false, "devices":client.devices(), "egresses":[]}))
         .collect::<Vec<_>>();
     let gateways = vec![
-        serde_json::json!({"recipient":"gateway-one","service_public_key":key(101),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(101)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"users":["alice","alice-work","bob"],"tenants":[{"user":"alice","public_key":key(102)},{"user":"alice-work","public_key":key(103)},{"user":"bob","public_key":key(104)}]}),
-        serde_json::json!({"recipient":"gateway-two","service_public_key":key(111),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(111)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"users":["bob"],"tenants":[{"user":"bob","public_key":key(112)}]}),
+        serde_json::json!({"recipient":"gateway-one","service_public_key":key(101),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(101)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"traffic":"entry","users":["alice","alice-work","bob"],"tenants":[{"user":"alice","public_key":key(102)},{"user":"alice-work","public_key":key(103)},{"user":"bob","public_key":key(104)}]}),
+        serde_json::json!({"recipient":"gateway-two","service_public_key":key(111),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(111)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"traffic":"entry","users":["bob"],"tenants":[{"user":"bob","public_key":key(112)}]}),
     ];
     for (target, body) in [
         ("/api/v1/users", serde_json::json!({"users": users})),
@@ -573,6 +576,17 @@ fn every_route_requires_the_retained_bearer_before_any_mutation() {
     let mut service = fixture.service();
     let routes = [
         ("GET", "/api/v1/config", b"".as_slice()),
+        ("GET", "/api/v1/egresses", b""),
+        ("GET", "/api/v1/egresses/office", b""),
+        ("POST", "/api/v1/egresses", b"{}"),
+        ("DELETE", "/api/v1/egresses/office", b""),
+        ("PUT", "/api/v1/egresses/office", b"{}"),
+        ("GET", "/api/v1/egresses/office/node", b""),
+        ("PUT", "/api/v1/egresses/office/node", b"{}"),
+        ("GET", "/api/v1/users/alice/egresses", b""),
+        ("PUT", "/api/v1/users/alice/egresses", b"{}"),
+        ("PUT", "/api/v1/users/alice/egresses/office", b"{}"),
+        ("DELETE", "/api/v1/users/alice/egresses/office", b""),
         ("POST", "/api/v1/token/rotate", b""),
         ("GET", "/api/v1/users", b""),
         ("GET", "/api/v1/users/alice", b""),
@@ -1214,6 +1228,11 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
         ("users/{user}/devices/{device}", "delete get"),
         ("users/{user}/devices/{device}/config", "get"),
         ("users/{user}/devices/{device}/config/{network}", "get"),
+        ("egresses", "get post"),
+        ("egresses/{egress}", "delete get put"),
+        ("egresses/{egress}/node", "get put"),
+        ("users/{user}/egresses", "get put"),
+        ("users/{user}/egresses/{egress}", "delete put"),
         ("gateways", "get post"),
         ("gateways/{gateway}", "delete get"),
         ("node-invitations", "post"),
@@ -1318,3 +1337,6 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
     );
     assert_eq!(fixture.bytes(), snapshot);
 }
+
+#[path = "api/egress.rs"]
+mod egress;

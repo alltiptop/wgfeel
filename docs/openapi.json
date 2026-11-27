@@ -97,7 +97,7 @@
             }
           }
         },
-        "description": "POST requires application/json."
+        "description": "POST and PUT require application/json."
       },
       "Error422": {
         "content": {
@@ -167,6 +167,46 @@
           "deny"
         ],
         "type": "string"
+      },
+      "AssignmentList": {
+        "properties": {
+          "egresses": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "egresses"
+        ],
+        "type": "object"
+      },
+      "AssignmentView": {
+        "properties": {
+          "dns": {
+            "$ref": "#/components/schemas/EgressDnsSelection"
+          },
+          "dormant": {
+            "type": "boolean"
+          },
+          "egress_id": {
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/IpPrefix"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "egress_id",
+          "routes",
+          "dns",
+          "dormant"
+        ],
+        "type": "object"
       },
       "ChangeDistribution": {
         "enum": [
@@ -357,6 +397,331 @@
         ],
         "type": "object"
       },
+      "Egress": {
+        "properties": {
+          "addresses": {
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allowed_ips": {
+            "items": {
+              "$ref": "#/components/schemas/IpPrefix"
+            },
+            "type": "array"
+          },
+          "dns_servers": {
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "has_preshared_key": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "interface_public_key": {
+            "type": "string"
+          },
+          "mtu": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer_public_key": {
+            "type": "string"
+          },
+          "pending_node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persistent_keepalive": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "placement_state": {
+            "$ref": "#/components/schemas/PlacementState"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "node",
+          "pending_node",
+          "placement_state",
+          "interface_public_key",
+          "addresses",
+          "dns_servers",
+          "mtu",
+          "peer_public_key",
+          "endpoint",
+          "allowed_ips",
+          "persistent_keepalive",
+          "has_preshared_key"
+        ],
+        "type": "object"
+      },
+      "EgressDnsSelection": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "zones",
+                "type": "string"
+              },
+              "zones": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode",
+              "zones"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "EgressKeyReservation": {
+        "additionalProperties": false,
+        "properties": {
+          "former_node": {
+            "type": "string"
+          },
+          "former_service_public_key": {
+            "type": "string"
+          },
+          "interface_public_key": {
+            "type": "string"
+          },
+          "removal_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "interface_public_key",
+          "former_node",
+          "former_service_public_key",
+          "removal_generation"
+        ],
+        "type": "object"
+      },
+      "EgressNode": {
+        "properties": {
+          "egress_id": {
+            "type": "string"
+          },
+          "former_node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pending_node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "placement_state": {
+            "$ref": "#/components/schemas/PlacementState"
+          },
+          "withdrawal_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "egress_id",
+          "node",
+          "pending_node",
+          "placement_state",
+          "former_node",
+          "withdrawal_generation"
+        ],
+        "type": "object"
+      },
+      "EgressProfile": {
+        "$ref": "#/components/schemas/EgressProfileFields"
+      },
+      "EgressProfileFields": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allowed_ips": {
+            "items": {
+              "$ref": "#/components/schemas/IpPrefix"
+            },
+            "type": "array"
+          },
+          "dns_servers": {
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "has_preshared_key": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "interface_public_key": {
+            "type": "string"
+          },
+          "mtu": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer_public_key": {
+            "type": "string"
+          },
+          "pending_node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persistent_keepalive": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "secret_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "node",
+          "pending_node",
+          "secret_revision",
+          "interface_public_key",
+          "addresses",
+          "dns_servers",
+          "mtu",
+          "peer_public_key",
+          "endpoint",
+          "allowed_ips",
+          "persistent_keepalive",
+          "has_preshared_key"
+        ],
+        "type": "object"
+      },
+      "Egresses": {
+        "properties": {
+          "egresses": {
+            "items": {
+              "$ref": "#/components/schemas/Egress"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "egresses"
+        ],
+        "type": "object"
+      },
       "Endpoint": {
         "properties": {
           "device": {
@@ -425,6 +790,9 @@
             },
             "type": "array"
           },
+          "traffic": {
+            "$ref": "#/components/schemas/TrafficMode"
+          },
           "users": {
             "items": {
               "type": [
@@ -436,6 +804,7 @@
           }
         },
         "required": [
+          "traffic",
           "recipient",
           "service_public_key",
           "gateway_public_key",
@@ -597,6 +966,10 @@
         ],
         "type": "object"
       },
+      "IpPrefix": {
+        "description": "Canonical CIDR. The network address is masked even for input with host bits.",
+        "type": "string"
+      },
       "IssuedInvitation": {
         "properties": {
           "expires_at": {
@@ -644,6 +1017,15 @@
           "devices"
         ],
         "type": "object"
+      },
+      "PlacementState": {
+        "enum": [
+          "unassigned",
+          "placed",
+          "detaching",
+          "moving"
+        ],
+        "type": "string"
       },
       "Policy": {
         "properties": {
@@ -736,6 +1118,12 @@
             },
             "type": "array"
           },
+          "egresses": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentView"
+            },
+            "type": "array"
+          },
           "id": {
             "type": "string"
           },
@@ -748,10 +1136,57 @@
           }
         },
         "required": [
+          "egresses",
           "id",
           "name",
           "suspended",
           "devices"
+        ],
+        "type": "object"
+      },
+      "UserEgressAssignment": {
+        "additionalProperties": false,
+        "properties": {
+          "dns": {
+            "$ref": "#/components/schemas/EgressDnsSelection"
+          },
+          "egress_id": {
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/IpPrefix"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "egress_id",
+          "routes",
+          "dns"
+        ],
+        "type": "object"
+      },
+      "UserEgresses": {
+        "additionalProperties": false,
+        "properties": {
+          "egresses": {
+            "items": {
+              "$ref": "#/components/schemas/UserEgressAssignment"
+            },
+            "type": "array"
+          },
+          "network": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "network",
+          "egresses"
         ],
         "type": "object"
       },
@@ -819,6 +1254,18 @@
             "$ref": "#/components/schemas/WireConfig",
             "description": "Device registrations, networks and routing policy at this revision."
           },
+          "egress_key_reservations": {
+            "items": {
+              "$ref": "#/components/schemas/EgressKeyReservation"
+            },
+            "type": "array"
+          },
+          "egresses": {
+            "items": {
+              "$ref": "#/components/schemas/EgressProfile"
+            },
+            "type": "array"
+          },
           "management_id": {
             "description": "ID of the authoritative main node.",
             "type": "string"
@@ -828,6 +1275,12 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "user_egresses": {
+            "items": {
+              "$ref": "#/components/schemas/UserEgresses"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -835,6 +1288,9 @@
           "management_id",
           "config",
           "assignments",
+          "egresses",
+          "user_egresses",
+          "egress_key_reservations",
           "clients"
         ],
         "type": "object"
@@ -849,7 +1305,7 @@
     }
   },
   "info": {
-    "description": "HTTP/1.1 administrative API on main. POST requires Content-Type: application/json and Content-Length, including requests with an empty body.",
+    "description": "HTTP/1.1 administrative API on main. POST and PUT require Content-Type: application/json and Content-Length, including requests with an empty body.",
     "title": "wgfeel administrative REST API",
     "version": "0.1.0"
   },
@@ -966,6 +1422,759 @@
           }
         },
         "summary": "List the desired and acknowledged configuration revision for each node."
+      }
+    },
+    "/api/v1/egresses": {
+      "get": {
+        "operationId": "list_egresses",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Egresses"
+                }
+              }
+            },
+            "description": "List external WireGuard profiles saved on main.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List external WireGuard profiles saved on main."
+      },
+      "post": {
+        "operationId": "create_egress",
+        "parameters": [
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "config": {
+                    "description": "WireGuard profile contents. Write only.",
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "name": {
+                    "description": "Display name. Defaults to the provider endpoint host.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "node": {
+                    "description": "Optional entry node that will receive the provider key.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "users": {
+                    "description": "User grants to create in the same transaction. Grants require placement.",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "dns": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "none",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "mode"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "default",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "mode"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "zones",
+                                  "type": "string"
+                                },
+                                "zones": {
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "type": "array"
+                                }
+                              },
+                              "required": [
+                                "mode",
+                                "zones"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "routes": {
+                          "items": {
+                            "description": "Canonical CIDR. The network address is masked even for input with host bits.",
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "user": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "user",
+                        "routes",
+                        "dns"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "config"
+                ],
+                "title": "AddEgress",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Import an unassigned external WireGuard profile on main.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Import an unassigned external WireGuard profile on main."
+      }
+    },
+    "/api/v1/egresses/{egress}": {
+      "delete": {
+        "operationId": "delete_egress",
+        "parameters": [
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Delete an unused external profile and its saved keys.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Delete an unused external profile and its saved keys."
+      },
+      "get": {
+        "operationId": "get_egress",
+        "parameters": [
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Egress"
+                }
+              }
+            },
+            "description": "Read the public metadata of a saved external profile.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Read the public metadata of a saved external profile."
+      },
+      "put": {
+        "operationId": "replace_egress",
+        "parameters": [
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "config": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "config"
+                ],
+                "title": "ReplaceEgress",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Egress"
+                }
+              }
+            },
+            "description": "Replace the provider profile while retaining its ID and grants.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Replace the provider profile while retaining its ID and grants."
+      }
+    },
+    "/api/v1/egresses/{egress}/node": {
+      "get": {
+        "operationId": "get_egress_node",
+        "parameters": [
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressNode"
+                }
+              }
+            },
+            "description": "Read the current egress placement and any pending handoff.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Read the current egress placement and any pending handoff."
+      },
+      "put": {
+        "operationId": "set_egress_node",
+        "parameters": [
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "node"
+                ],
+                "title": "SetEgressNode",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressNode"
+                }
+              }
+            },
+            "description": "Attach, detach or move an external profile.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressNode"
+                }
+              }
+            },
+            "description": "Awaiting authenticated release by the former node.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Attach, detach or move an external profile."
       }
     },
     "/api/v1/gateways": {
@@ -2583,6 +3792,555 @@
           }
         },
         "summary": "Export the device's private WireGuard profile for the specified network."
+      }
+    },
+    "/api/v1/users/{user}/egresses": {
+      "get": {
+        "operationId": "get_user_egresses",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentList"
+                }
+              }
+            },
+            "description": "List the user's assigned routes and DNS selections.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "List the user's assigned routes and DNS selections."
+      },
+      "put": {
+        "operationId": "set_user_egresses",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "egresses": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "dns": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "none",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "mode"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "default",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "mode"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "const": "zones",
+                                  "type": "string"
+                                },
+                                "zones": {
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "type": "array"
+                                }
+                              },
+                              "required": [
+                                "mode",
+                                "zones"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "egress_id": {
+                          "type": "string"
+                        },
+                        "routes": {
+                          "items": {
+                            "description": "Canonical CIDR. The network address is masked even for input with host bits.",
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "egress_id",
+                        "routes",
+                        "dns"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "egresses"
+                ],
+                "title": "GrantSet",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentList"
+                }
+              }
+            },
+            "description": "Replace all of the user's grants in one revision.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Replace all of the user's grants in one revision."
+      }
+    },
+    "/api/v1/users/{user}/egresses/{egress}": {
+      "delete": {
+        "operationId": "delete_user_egress",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeReceipt"
+                }
+              }
+            },
+            "description": "Revoke one grant while preserving the user's other egresses.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Revoke one grant while preserving the user's other egresses."
+      },
+      "put": {
+        "operationId": "set_user_egress",
+        "parameters": [
+          {
+            "description": "The user ID.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The egress ID.",
+            "in": "path",
+            "name": "egress",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ETag of the configuration revision expected by the caller.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "examples": [
+                "\"7\""
+              ],
+              "pattern": "^\"[1-9][0-9]*\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "dns": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "mode": {
+                            "const": "none",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "mode"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "mode": {
+                            "const": "default",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "mode"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "mode": {
+                            "const": "zones",
+                            "type": "string"
+                          },
+                          "zones": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "mode",
+                          "zones"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "routes": {
+                    "items": {
+                      "description": "Canonical CIDR. The network address is masked even for input with host bits.",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "routes",
+                  "dns"
+                ],
+                "title": "GrantInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentView"
+                }
+              }
+            },
+            "description": "Set the user's routes and DNS for one external profile.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current configuration revision.",
+                "required": true,
+                "schema": {
+                  "examples": [
+                    "\"7\""
+                  ],
+                  "pattern": "^\"[1-9][0-9]*\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "411": {
+            "$ref": "#/components/responses/Error411"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "431": {
+            "$ref": "#/components/responses/Error431"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        },
+        "summary": "Set the user's routes and DNS for one external profile."
       }
     },
     "/api/v1/users/{user}/resume": {

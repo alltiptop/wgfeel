@@ -57,6 +57,7 @@ impl Transport {
             selected.projection(),
             state.node_keys(),
             selected.keys(),
+            selected.egress_keys(),
         )?;
         Ok(Self {
             forwarding,
@@ -70,6 +71,12 @@ impl Transport {
             acknowledged: 0,
             diagnostics: VecDeque::with_capacity(16),
         })
+    }
+    pub(super) fn applied_generation(&self) -> u64 {
+        self.forwarding.generation()
+    }
+    pub(super) fn peer_identity(&self, id: &NodeId) -> Option<&DevicePublicKey> {
+        self.forwarding.peer_identity(id)
     }
     pub(super) fn ready(&self) -> bool {
         self.forwarding.ready()
@@ -90,7 +97,12 @@ impl Transport {
             let selected = delivery(&state)?;
             if self
                 .forwarding
-                .configure(selected.projection(), state.node_keys(), selected.keys())
+                .configure(
+                    selected.projection(),
+                    state.node_keys(),
+                    selected.keys(),
+                    selected.egress_keys(),
+                )
                 .is_err()
             {
                 self.record_diagnostic("main forwarding configuration could not be prepared");
