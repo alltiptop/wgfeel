@@ -183,6 +183,29 @@ fn uuid(value: &str) {
     assert!(b"89ab".contains(&value.as_bytes()[19]));
 }
 #[test]
+fn adding_a_user_without_a_gateway_reports_how_to_finish_device_setup() {
+    let install = Installation::new();
+    let mut out = Vec::new();
+    let error = run_with_io(
+        &["user".into(), "add".into(), "Alice".into()],
+        &install.path,
+        &mut io::Cursor::new("laptop\n"),
+        &mut out,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error, "Management rejected request");
+    let users = install.users();
+    let users = users["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    let id = users[0]["id"].as_str().unwrap();
+    assert!(users[0]["devices"].as_array().unwrap().is_empty());
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("gateway_required"));
+    assert!(out.contains(&format!("wgfeel user show {id}")));
+    assert!(out.contains(&format!("wgfeel device add --user {id}")));
+}
+#[test]
 fn installed_menus_generate_ids_show_native_config_and_confirm_every_deletion() {
     let installation = Installation::new();
     installation.gateway();

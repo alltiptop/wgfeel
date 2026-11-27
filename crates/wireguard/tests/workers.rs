@@ -1401,101 +1401,25 @@ fn main() -> ExitCode {
     if let Some(status) = worker_main(&arguments) {
         return status;
     }
-    let cases: &[(&str, fn())] = &[
-        (
-            "service_peer_changes_preserve_sessions_and_never_reconfigure_tenants",
-            service_peer_changes_preserve_sessions_and_never_reconfigure_tenants,
-        ),
-        (
-            "real_workers_install_policy_have_distinct_processes_and_drop_reaps_them",
-            real_workers_install_policy_have_distinct_processes_and_drop_reaps_them,
-        ),
-        (
-            "tenant_and_system_workers_complete_real_bidirectional_ipv4_ipv6",
-            tenant_and_system_workers_complete_real_bidirectional_ipv4_ipv6,
-        ),
-        (
-            "gateway_initiation_busy_and_reset_preserve_other_context",
-            gateway_initiation_busy_and_reset_preserve_other_context,
-        ),
-        (
-            "restart_rejects_public_identity_changes_and_retires_previous_generation",
-            restart_rejects_public_identity_changes_and_retires_previous_generation,
-        ),
-        (
-            "unexpected_worker_death_revokes_its_indices_without_disrupting_healthy_peer",
-            unexpected_worker_death_revokes_its_indices_without_disrupting_healthy_peer,
-        ),
-        (
-            "invalid_options_and_public_diagnostics_exclude_private_bytes",
-            invalid_options_and_public_diagnostics_exclude_private_bytes,
-        ),
-        (
-            "shared_udp_port_drives_all_worker_contexts_without_child_sockets",
-            shared_udp_port_drives_all_worker_contexts_without_child_sockets,
-        ),
-        (
-            "no_private_input_before_ready_and_bootstrap_contains_only_own_material",
-            no_private_input_before_ready_and_bootstrap_contains_only_own_material,
-        ),
-        (
-            "healthy_worker_progresses_before_stalled_sibling_operation_deadline",
-            healthy_worker_progresses_before_stalled_sibling_operation_deadline,
-        ),
-        (
-            "healthy_worker_progresses_while_sibling_never_reports_sandbox_ready",
-            healthy_worker_progresses_while_sibling_never_reports_sandbox_ready,
-        ),
-        (
-            "malformed_stale_oversized_and_flooded_replies_fail_closed_without_harming_peer",
-            malformed_stale_oversized_and_flooded_replies_fail_closed_without_harming_peer,
-        ),
-        (
-            "colliding_child_snapshot_cannot_replace_other_channels_index",
-            colliding_child_snapshot_cannot_replace_other_channels_index,
-        ),
-        (
-            "reset_cannot_claim_authentication_or_release_plaintext_for_valid_peer",
-            reset_cannot_claim_authentication_or_release_plaintext_for_valid_peer,
-        ),
-        (
-            "authentication_claim_must_match_successful_receive_outcome",
-            authentication_claim_must_match_successful_receive_outcome,
-        ),
-        (
-            "unsolicited_partial_prefix_is_rejected_while_worker_is_idle",
-            unsolicited_partial_prefix_is_rejected_while_worker_is_idle,
-        ),
-        (
-            "parent_cookie_admission_is_single_and_retry_reaches_real_confined_worker",
-            parent_cookie_admission_is_single_and_retry_reaches_real_confined_worker,
-        ),
-        (
-            "roaming_requires_crypto_authentication_and_includes_malformed_ip_and_keepalive",
-            roaming_requires_crypto_authentication_and_includes_malformed_ip_and_keepalive,
-        ),
-    ];
-    let filter = arguments
-        .iter()
-        .filter_map(|argument| argument.to_str())
-        .find(|argument| !argument.starts_with('-'));
-    let (mut passed, mut failed) = (0, 0);
-    for (name, case) in cases {
-        if filter.is_some_and(|filter| !name.contains(filter)) {
-            continue;
-        }
-        if std::panic::catch_unwind(*case).is_ok() {
-            passed += 1;
-            println!("test {name} ... ok");
-        } else {
-            failed += 1;
-            println!("test {name} ... FAILED");
-        }
-    }
-    println!("workers result: {passed} passed; {failed} failed");
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    wgfeel_test_support::worker_tests!(
+        &arguments,
+        service_peer_changes_preserve_sessions_and_never_reconfigure_tenants,
+        real_workers_install_policy_have_distinct_processes_and_drop_reaps_them,
+        tenant_and_system_workers_complete_real_bidirectional_ipv4_ipv6,
+        gateway_initiation_busy_and_reset_preserve_other_context,
+        restart_rejects_public_identity_changes_and_retires_previous_generation,
+        unexpected_worker_death_revokes_its_indices_without_disrupting_healthy_peer,
+        invalid_options_and_public_diagnostics_exclude_private_bytes,
+        shared_udp_port_drives_all_worker_contexts_without_child_sockets,
+        no_private_input_before_ready_and_bootstrap_contains_only_own_material,
+        healthy_worker_progresses_before_stalled_sibling_operation_deadline,
+        healthy_worker_progresses_while_sibling_never_reports_sandbox_ready,
+        malformed_stale_oversized_and_flooded_replies_fail_closed_without_harming_peer,
+        colliding_child_snapshot_cannot_replace_other_channels_index,
+        reset_cannot_claim_authentication_or_release_plaintext_for_valid_peer,
+        authentication_claim_must_match_successful_receive_outcome,
+        unsolicited_partial_prefix_is_rejected_while_worker_is_idle,
+        parent_cookie_admission_is_single_and_retry_reaches_real_confined_worker,
+        roaming_requires_crypto_authentication_and_includes_malformed_ip_and_keepalive,
+    )
 }

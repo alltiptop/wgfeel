@@ -1,8 +1,14 @@
 //! Projection-bound forwarding through real self-executed confined workers.
+#[path = "local_workers/remote.rs"]
+mod remote;
 use gotatun::{
     noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
     packet::Packet,
     x25519::{PublicKey, StaticSecret},
+};
+use remote::{
+    remote_broadcast_checks_the_witness_and_delivers_once_to_each_device,
+    remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner,
 };
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
@@ -722,312 +728,6 @@ fn native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation
             .receive_provider(&egress, provider.address, &stale)
             .is_err()
     );
-}
-
-fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner() {
-    use wgfeel_core::{
-        EgressDnsSelection, EgressId, EgressPolicy, UserEgressAssignment, UserEgresses,
-    };
-    use wgfeel_wireguard::mesh::{Direction, MeshTraffic};
-    let home = node("home");
-    let owner = node("owner");
-    let net = network("alice");
-    let egress = EgressId::new("vpn").unwrap();
-    let alice = Device::new(
-        device("phone"),
-        public(23),
-        vec!["10.203.0.9".parse().unwrap()],
-    )
-    .unwrap()
-    .with_gateway(Some(home.clone()));
-    let assignments = [
-        (&home, 9, 1, server()),
-        (&owner, 10, 2, "198.51.100.2:51820".parse().unwrap()),
-    ]
-    .map(|(node, key, tenant, addr)| {
-        GatewayAssignment::new(
-            node.clone(),
-            public(key),
-            wgfeel_test_support::fixture_gateway_public(&public(key)),
-            vec![net.clone()],
-            vec![TenantKeyAssignment::new(net.clone(), public(tenant))],
-        )
-        .unwrap()
-        .with_endpoint(Some(addr))
-        .unwrap()
-    });
-    let routing = ManagementConfig::new(
-        home.clone(),
-        Config::new(
-            1,
-            vec![
-                Network::new(
-                    net.clone(),
-                    std::iter::once(alice)
-                        .chain(
-                            [("tablet", 24, "10.203.0.10"), ("laptop", 25, "10.203.0.11")].map(
-                                |(name, key, addr)| {
-                                    Device::new(
-                                        device(name),
-                                        public(key),
-                                        vec![addr.parse().unwrap()],
-                                    )
-                                    .unwrap()
-                                    .with_gateway(Some(owner.clone()))
-                                },
-                            ),
-                        )
-                        .collect(),
-                )
-                .unwrap()
-                .with_private_lan(true),
-            ],
-            Policy::new(vec![], vec![], vec![]),
-        )
-        .unwrap(),
-        assignments.to_vec(),
-    )
-    .unwrap()
-    .with_egress_policy(EgressPolicy {
-        profiles: vec![external_profile(&egress, &owner)],
-        users: vec![UserEgresses {
-            user: wgfeel_core::ClientId::new("alice").unwrap(),
-            network: net.clone(),
-            egresses: vec![UserEgressAssignment {
-                egress_id: egress.clone(),
-                routes: vec!["0.0.0.0/0".parse().unwrap()],
-                dns: EgressDnsSelection::None {},
-            }],
-        }],
-        reservations: vec![],
-    })
-    .unwrap();
-    let mut gateways: Vec<_> = [(&home, 9, 1), (&owner, 10, 2)]
-        .iter()
-        .map(|(node, key, tenant)| {
-            let projection = routing.project_mesh_for(node).unwrap();
-            let interface = wgfeel_core::EgressPrivateKey::new(seed(50)).unwrap();
-            let psk = wgfeel_core::PresharedKey::new(seed(52)).unwrap();
-            let providers = (*node == &owner).then_some((&egress, &interface, Some(&psk)));
-            let gateway = LocalGateway::spawn_with_egresses(
-                &projection,
-                &public(9),
-                &wgfeel_test_support::fixture_node_keys(seed(*key)),
-                [(&net, &TenantPrivateKey::new(seed(*tenant)).unwrap())],
-                providers,
-                Limits::default(),
-                options(),
-            )
-            .unwrap();
-            let mut fixture = Fixture {
-                gateway,
-                clients: if *node == &owner {
-                    vec![
-                        Client::new("alice", "tablet", 24, 2),
-                        Client::new("alice", "laptop", 25, 2),
-                    ]
-                } else {
-                    vec![Client::new("alice", "phone", 23, 1)]
-                },
-            };
-            fixture.ready();
-            fixture
-        })
-        .collect();
-    let mut exit = gateways.pop().unwrap();
-    let mut entry = gateways.pop().unwrap();
-    entry.establish(0);
-    let mut provider = establish_provider(&mut exit, &egress);
-    let context = ContextId::Tenant(net.clone());
-    entry
-        .gateway
-        .initiate_at(
-            &context,
-            &PeerId::Gateway(owner.clone()),
-            assignments[1].endpoint().unwrap(),
-        )
-        .unwrap();
-    for outbound in [true, false, true] {
-        let (sender, receiver, origin) = if outbound {
-            (&mut entry, &mut exit, &home)
-        } else {
-            (&mut exit, &mut entry, &owner)
-        };
-        let LocalEvent::MeshOutput {
-            packet,
-            traffic: None,
-            ..
-        } = sender.event()
-        else {
-            panic!("tenant handshake missing")
-        };
-        receiver
-            .gateway
-            .receive_mesh(&net, origin, packet.as_bytes(), None)
-            .unwrap();
-    }
-    exit.wait_idle(&context);
-    exit.establish(0);
-    exit.establish(1);
-    check_remote_broadcast(&mut entry, &mut exit);
-    let packet = udp(false, "10.203.0.9", "203.0.113.23", 64, 73);
-    entry.submit(0, &packet);
-    let LocalEvent::MeshOutput {
-        packet: unlabelled,
-        traffic: Some(MeshTraffic::External(_)),
-        ..
-    } = entry.event()
-    else {
-        panic!("missing egress frame")
-    };
-    assert!(
-        exit.gateway
-            .receive_datagram(server(), unlabelled.as_bytes())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        matches!(exit.event(), LocalEvent::Dropped { .. }),
-        "raw inter-entry input must not reach the provider"
-    );
-    entry.submit(0, &packet);
-    let LocalEvent::MeshOutput {
-        packet: wire,
-        traffic: Some(MeshTraffic::External(to)),
-        ..
-    } = entry.event()
-    else {
-        panic!("missing typed egress output")
-    };
-    assert_eq!(to.direction, Direction::ToEgress);
-    exit.gateway
-        .receive_mesh(
-            &net,
-            &home,
-            wire.as_bytes(),
-            Some(MeshTraffic::External(to)),
-        )
-        .unwrap();
-    let LocalEvent::ProviderOutput(out) = exit.event() else {
-        panic!("provider did not receive remotely originated traffic")
-    };
-    let TunnResult::WriteToTunnel(translated) = provider.receive(server(), out.packet.as_bytes())
-    else {
-        panic!("provider could not authenticate")
-    };
-    assert_eq!(&translated[12..16], &[172, 16, 4, 2]);
-    let mut reply = udp(false, "203.0.113.23", "172.16.4.2", 63, 45);
-    reply[20..22].copy_from_slice(&packet[22..24]);
-    reply[22..24].copy_from_slice(&translated[20..22]);
-    reply[26..28].fill(0);
-    let wire = provider.encrypt(&reply);
-    exit.gateway
-        .receive_provider(&egress, provider.address, &wire)
-        .unwrap();
-    let LocalEvent::MeshOutput {
-        packet: wire,
-        traffic: Some(MeshTraffic::External(from)),
-        ..
-    } = exit.event()
-    else {
-        panic!("missing typed return")
-    };
-    assert_eq!(from.direction, Direction::FromEgress);
-    entry
-        .gateway
-        .receive_mesh(
-            &net,
-            &owner,
-            wire.as_bytes(),
-            Some(MeshTraffic::External(from)),
-        )
-        .unwrap();
-    let LocalEvent::Network(out) = entry.event() else {
-        panic!("home denied legitimate provider return")
-    };
-    let TunnResult::WriteToTunnel(response) =
-        entry.clients[0].receive(server(), out.packet.as_bytes())
-    else {
-        panic!("device could not authenticate reply")
-    };
-    assert_eq!(&response[16..20], &[10, 203, 0, 9]);
-    assert_eq!(response[8], 62);
-}
-
-fn check_remote_broadcast(entry: &mut Fixture, exit: &mut Fixture) {
-    use wgfeel_wireguard::mesh::{BroadcastTraffic, MeshTraffic, Traffic};
-    let src = "10.203.0.9";
-    let directed = "10.203.255.255";
-    let source = endpoint("alice", "phone");
-    let target = endpoint("alice", "tablet");
-    let broadcast = MeshTraffic::Broadcast(BroadcastTraffic {
-        source: source.clone(),
-        witness: target.clone(),
-    });
-    let unicast = MeshTraffic::Device(Traffic {
-        source: source.clone(),
-        destination: target,
-    });
-    // Both forms of a mismatch must be rejected *after* authenticating the tenant ciphertext.
-    for (dest, override_label) in [
-        (directed, Some(unicast)),
-        ("10.203.0.10", Some(broadcast)),
-        (
-            directed,
-            Some(MeshTraffic::Broadcast(BroadcastTraffic {
-                source: source.clone(),
-                witness: source.clone(),
-            })),
-        ),
-        (directed, None),
-    ] {
-        entry.submit(0, &udp(false, src, dest, 4, 88));
-        let LocalEvent::MeshOutput {
-            packet,
-            traffic: Some(label),
-            peer: home,
-            ..
-        } = entry.event()
-        else {
-            panic!("missing remote tenant packet")
-        };
-        assert_eq!(home, node("owner"));
-        assert_eq!(matches!(label, MeshTraffic::Broadcast(_)), dest == directed);
-        if let Some(label) = override_label {
-            exit.gateway
-                .receive_mesh(
-                    &network("alice"),
-                    &node("home"),
-                    packet.as_bytes(),
-                    Some(label),
-                )
-                .unwrap();
-            exit.wait_idle(&context("alice"));
-        } else {
-            exit.gateway
-                .receive_mesh(
-                    &network("alice"),
-                    &node("home"),
-                    packet.as_bytes(),
-                    Some(label),
-                )
-                .unwrap();
-            for (i, dest) in ["10.203.0.10", "10.203.0.11"].into_iter().enumerate() {
-                let LocalEvent::Network(out) = exit.event() else {
-                    panic!("missing recipient")
-                };
-                let wire = encrypted(out, &exit.clients[i]);
-                exit.clients[i].assert_plaintext(server(), &wire, &udp(false, src, dest, 4, 88));
-            }
-        }
-        for fixture in [&mut *entry, &mut *exit] {
-            let deadline = Instant::now() + WAIT;
-            while fixture.gateway.has_broadcast_jobs() {
-                assert!(fixture.gateway.poll().is_none(), "extra copy or re-relay");
-                assert!(Instant::now() < deadline);
-            }
-        }
-    }
 }
 
 fn projection_pins_and_exact_local_keys_are_required_before_workers_start() {
@@ -1907,81 +1607,21 @@ fn main() -> ExitCode {
     if let Some(status) = worker_main(&arguments) {
         return status;
     }
-    let cases: &[(&str, fn())] = &[
-        (
-            "broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy",
-            broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy,
-        ),
-        (
-            "remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner",
-            remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner,
-        ),
-        (
-            "native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation",
-            native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation,
-        ),
-        (
-            "projection_pins_and_exact_local_keys_are_required_before_workers_start",
-            projection_pins_and_exact_local_keys_are_required_before_workers_start,
-        ),
-        (
-            "overlapping_tenants_forward_ipv4_ipv6_only_to_their_own_device_with_one_hop",
-            overlapping_tenants_forward_ipv4_ipv6_only_to_their_own_device_with_one_hop,
-        ),
-        (
-            "directional_grants_global_denies_and_ambiguous_remote_addresses_survive_worker_boundary",
-            directional_grants_global_denies_and_ambiguous_remote_addresses_survive_worker_boundary,
-        ),
-        (
-            "unavailable_nonlocal_and_invalid_packets_drop_without_a_later_payload_queue",
-            unavailable_nonlocal_and_invalid_packets_drop_without_a_later_payload_queue,
-        ),
-        (
-            "actual_udp_denies_global_rule_and_spoof_then_delivers_permitted_reverse_flow",
-            actual_udp_denies_global_rule_and_spoof_then_delivers_permitted_reverse_flow,
-        ),
-        (
-            "handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives",
-            handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives,
-        ),
-        (
-            "busy_destination_drops_without_replay_and_other_tenant_keeps_progressing",
-            busy_destination_drops_without_replay_and_other_tenant_keeps_progressing,
-        ),
-        (
-            "source_restart_suppresses_pending_cross_worker_output_without_killing_destination",
-            source_restart_suppresses_pending_cross_worker_output_without_killing_destination,
-        ),
-        (
-            "observed_source_death_cancels_pending_output_and_destination_death_clears_its_work",
-            observed_source_death_cancels_pending_output_and_destination_death_clears_its_work,
-        ),
-        (
-            "hostile_own_context_plaintext_cannot_bypass_parent_source_policy_or_packet_checks",
-            hostile_own_context_plaintext_cannot_bypass_parent_source_policy_or_packet_checks,
-        ),
-    ];
-    let filter = arguments
-        .iter()
-        .filter_map(|argument| argument.to_str())
-        .find(|argument| !argument.starts_with('-'));
-    let (mut passed, mut failed) = (0, 0);
-    for (name, case) in cases {
-        if filter.is_some_and(|filter| !name.contains(filter)) {
-            continue;
-        }
-        if std::panic::catch_unwind(*case).is_ok() {
-            passed += 1;
-            println!("test {name} ... ok");
-        } else {
-            failed += 1;
-            println!("test {name} ... FAILED");
-        }
-    }
-    println!("local workers result: {passed} passed; {failed} failed");
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    wgfeel_test_support::worker_tests!(
+        &arguments,
+        broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy,
+        remote_broadcast_checks_the_witness_and_delivers_once_to_each_device,
+        remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner,
+        native_provider_psk_isolated_from_public_udp_and_round_trips_user_translation,
+        projection_pins_and_exact_local_keys_are_required_before_workers_start,
+        overlapping_tenants_forward_ipv4_ipv6_only_to_their_own_device_with_one_hop,
+        directional_grants_global_denies_and_ambiguous_remote_addresses_survive_worker_boundary,
+        unavailable_nonlocal_and_invalid_packets_drop_without_a_later_payload_queue,
+        actual_udp_denies_global_rule_and_spoof_then_delivers_permitted_reverse_flow,
+        handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives,
+        busy_destination_drops_without_replay_and_other_tenant_keeps_progressing,
+        source_restart_suppresses_pending_cross_worker_output_without_killing_destination,
+        observed_source_death_cancels_pending_output_and_destination_death_clears_its_work,
+        hostile_own_context_plaintext_cannot_bypass_parent_source_policy_or_packet_checks,
+    )
 }

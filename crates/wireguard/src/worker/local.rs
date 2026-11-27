@@ -1,3 +1,5 @@
+mod broadcast_jobs;
+
 use super::{
     RequestId, Submission, WorkerError, WorkerEvent, WorkerGateway, WorkerInfo, WorkerOptions,
 };
@@ -1080,13 +1082,7 @@ impl LocalGateway {
                 ) {
                     (Some(a), Some(b)) => {
                         a.len() == b.len()
-                            && a.iter().zip(b).all(|(a, b)| {
-                                a.id() == b.id()
-                                    && a.public_key() == b.public_key()
-                                    && a.addresses() == b.addresses()
-                                    && a.gateway() == b.gateway()
-                                    && a.hostname() == b.hostname()
-                            })
+                            && a.iter().zip(b).all(|(a, b)| a.same_worker_registration(b))
                     }
                     (None, None) => true,
                     _ => false,
@@ -1726,76 +1722,6 @@ impl LocalGateway {
         )
     }
 
-    fn start_broadcast(
-        &mut self,
-        origin: RequestId,
-        source: Endpoint,
-        home: &NodeId,
-        bytes: PacketBytes,
-    ) {
-        if self.broadcast_jobs.len() >= broadcast::MAX_JOBS
-            || self
-                .broadcast_jobs
-                .iter()
-                .any(|j| j.origin.context == origin.context)
-        {
-            return;
-        }
-        let now = Instant::now();
-        let Ok((mut scan, packet)) = broadcast::Scan::start(
-            &self.projection,
-            source,
-            home,
-            bytes,
-            &mut self.broadcast_limits,
-            now,
-        ) else {
-            return;
-        };
-        let len = packet.original().len();
-        let online = |peer: &PeerId| {
-            self.raw
-                .endpoint(&origin.context, peer)
-                .ok()
-                .flatten()
-                .is_some()
-        };
-        let (mut targets, last) = scan.next(&self.projection, online, true, now);
-        let exhausted =
-            self.broadcast_limits
-                .charge_batch(scan.source.network(), &mut targets, now);
-        let last = last || exhausted;
-        if last && targets.is_empty() {
-            return;
-        }
-        let Ok(request) = self.raw.broadcast_batch(
-            &origin.context,
-            origin.sequence,
-            Some(packet.into_bytes()),
-            targets,
-            last,
-            len,
-        ) else {
-            return;
-        };
-        self.flights.push(Flight {
-            request,
-            stage: Stage::Broadcast,
-        });
-        self.broadcast_jobs.push_back(BroadcastJob {
-            outer: if home != self.projection.recipient() {
-                self.raw.incarnation(&ContextId::Gateway)
-            } else {
-                None
-            },
-            origin,
-            revision: self.projection.generation(),
-            scan,
-            len,
-            last,
-            outputs: VecDeque::new(),
-        });
-    }
     pub fn lease_active(&self, lease: &WorkerLease) -> bool {
         lease.revision == self.projection.generation()
             && self
@@ -1809,122 +1735,6 @@ impl LocalGateway {
             generation,
             revision: self.projection.generation(),
         })
-    }
-    fn drain_broadcast(&mut self) -> Option<LocalEvent> {
-        for job in &mut self.broadcast_jobs {
-            if job
-                .outer
-                .is_some_and(|g| !self.raw.generation_is_active(&ContextId::Gateway, g))
-                || job.scan.expires <= Instant::now()
-                || !self
-                    .raw
-                    .generation_is_active(&job.origin.context, job.origin.generation)
-            {
-                job.outputs.clear();
-                continue;
-            }
-            if let Some((data, label)) = job.outputs.pop_front() {
-                return Some(
-                    if let (Some(label), Some(PeerId::Gateway(peer))) = (label, data.peer.as_ref())
-                    {
-                        LocalEvent::MeshOutput {
-                            provenance: Some(WorkerLease {
-                                context: job.origin.context.clone(),
-                                generation: job.origin.generation,
-                                revision: job.revision,
-                            }),
-                            network: job.scan.source.network().clone(),
-                            peer: peer.clone(),
-                            packet: data.packet,
-                            traffic: Some(MeshTraffic::Broadcast(label)),
-                        }
-                    } else {
-                        LocalEvent::Network(data)
-                    },
-                );
-            }
-        }
-        None
-    }
-    pub fn has_broadcast_jobs(&self) -> bool {
-        !self.broadcast_jobs.is_empty()
-    }
-    pub fn has_pending_broadcast(&self) -> bool {
-        self.broadcast_jobs
-            .iter()
-            .any(|j| !j.outputs.is_empty() || self.raw.ready_for(&j.origin.context))
-    }
-    /// Advance at most one scan slice on the runtime's broadcast turn.
-    pub fn advance_broadcast(&mut self) {
-        self.progress_broadcast(false);
-    }
-    fn progress_broadcast(&mut self, expired_only: bool) {
-        if self.broadcast_jobs.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        for _ in 0..self.broadcast_jobs.len() {
-            let Some(mut job) = self.broadcast_jobs.pop_front() else {
-                return;
-            };
-            if !self
-                .raw
-                .generation_is_active(&job.origin.context, job.origin.generation)
-            {
-                continue;
-            }
-            let expired = now >= job.scan.expires
-                || job
-                    .outer
-                    .is_some_and(|g| !self.raw.generation_is_active(&ContextId::Gateway, g));
-            if expired_only && !expired {
-                self.broadcast_jobs.push_back(job);
-                continue;
-            }
-            if expired {
-                job.scan.expires = now;
-                job.outputs.clear();
-            }
-            if !job.outputs.is_empty() || !self.raw.ready_for(&job.origin.context) {
-                self.broadcast_jobs.push_back(job);
-                continue;
-            }
-            if job.last {
-                continue;
-            }
-            let online = |peer: &PeerId| {
-                self.raw
-                    .endpoint(&job.origin.context, peer)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            };
-            let (mut targets, last) = job.scan.next(&self.projection, online, true, now);
-            let exhausted =
-                self.broadcast_limits
-                    .charge_batch(job.scan.source.network(), &mut targets, now);
-            let last = last || exhausted;
-            if targets.is_empty() && !last {
-                self.broadcast_jobs.push_back(job);
-                break;
-            }
-            job.last = last;
-            if let Ok(request) = self.raw.broadcast_batch(
-                &job.origin.context,
-                job.origin.sequence,
-                None,
-                targets,
-                last,
-                job.len,
-            ) {
-                self.flights.push(Flight {
-                    request,
-                    stage: Stage::Broadcast,
-                });
-                self.broadcast_jobs.push_back(job);
-            }
-            break;
-        }
     }
     fn nat_output(
         &mut self,

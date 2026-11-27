@@ -75,6 +75,22 @@ impl Device {
     pub fn id(&self) -> &DeviceId {
         &self.id
     }
+    /// Worker sessions survive a change to the broadcast policy alone.
+    pub fn same_worker_registration(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            public_key,
+            addresses,
+            gateway,
+            hostname,
+            broadcast: _,
+        } = self;
+        id == &other.id
+            && public_key == &other.public_key
+            && addresses == &other.addresses
+            && gateway == &other.gateway
+            && hostname == &other.hostname
+    }
     pub fn broadcast(&self) -> Option<bool> {
         self.broadcast
     }

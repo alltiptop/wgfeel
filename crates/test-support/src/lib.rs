@@ -4,6 +4,7 @@
 mod clock;
 mod keys;
 mod process;
+pub mod runner;
 
 pub use clock::{ClockError, Deadline, ManualClock};
 pub use keys::{fixture_gateway_public, fixture_node_keys, fixture_projection, fixture_public};

@@ -19,7 +19,7 @@ use std::{
 };
 use wgfeel_store::Store;
 use wgfeel_wireguard::{
-    ContextId, MAX_DATAGRAM_SIZE, PeerId,
+    ContextId, PeerId,
     worker::{EncryptedDatagram, LocalError, LocalEvent, LocalGateway, WorkerError, WorkerOptions},
 };
 
@@ -27,6 +27,8 @@ mod control;
 mod dns;
 mod egress;
 mod enrollment;
+mod forwarding;
+use forwarding::Forwarding;
 mod main;
 mod mesh;
 pub use main::{MainEvent, MainForwarder};
@@ -264,13 +266,8 @@ fn serve(
     .map_err(|_| "cannot create enrollment transport")?;
     let mut enrollment_outgoing = std::collections::VecDeque::new();
     let mut outgoing = std::collections::VecDeque::new();
-    let mut mesh = mesh::Runtime::new(gateway.projection())?;
-    let mut egress = egress::Runtime::new(&gateway);
-    let mut dns = dns::Runtime::default();
+    let mut forwarding = Forwarding::new(&gateway)?;
     let mut updates = control::Updates::default();
-    let mut buffer = [0; MAX_DATAGRAM_SIZE + 1];
-    let mut incoming = std::collections::VecDeque::new();
-    let mut ingress_first = false;
     if let Some(body) = bootstrap {
         let response = joining.local(
             &store,
@@ -327,7 +324,9 @@ fn serve(
         // monopolize a worker before every queued inbound handshake is read.
         for _ in 0..BATCH {
             match gateway.poll_ordinary() {
-                Some(LocalEvent::ProviderOutput(datagram)) => egress.send(&mut gateway, datagram),
+                Some(LocalEvent::ProviderOutput(datagram)) => {
+                    forwarding.egress.send(&mut gateway, datagram)
+                }
                 Some(LocalEvent::Network(datagram)) => {
                     if datagram.context == ContextId::Service
                         && gateway
@@ -345,20 +344,14 @@ fn serve(
                     send(&socket, datagram);
                 }
                 Some(event @ (LocalEvent::Mesh { .. } | LocalEvent::MeshOutput { .. })) => {
-                    mesh.event(event, start.elapsed(), &gateway)
+                    forwarding.mesh.event(event, start.elapsed(), &gateway)
                 }
                 Some(LocalEvent::Failed {
                     context,
                     generation,
                     ..
                 }) => {
-                    if context == ContextId::Gateway {
-                        mesh.clear_broadcast_assemblies();
-                    }
-                    egress.failed(&context);
-                    if let Some(timer) = timers.iter_mut().find(|timer| timer.context == context) {
-                        timer.failed = true;
-                    }
+                    forwarding.worker_failed(&context, &mut timers);
                     logger.emit(Log::Failed {
                         context,
                         generation,
@@ -369,7 +362,9 @@ fn serve(
                         let _ = control.receive(packet.as_bytes());
                     }
                 }
-                Some(LocalEvent::Dns { source, packet }) => dns.receive(source, packet.as_bytes()),
+                Some(LocalEvent::Dns { source, packet }) => {
+                    forwarding.dns.receive(source, packet.as_bytes())
+                }
                 Some(LocalEvent::Enrollment { packet }) => {
                     let _ = enrollment_tcp.receive(packet.as_bytes());
                 }
@@ -381,12 +376,7 @@ fn serve(
                 None => break,
             }
         }
-        ingress_first = !ingress_first;
-        if ingress_first {
-            receive(&socket, &mut gateway, &mut buffer, &mut incoming)?;
-        } else {
-            gateway.advance_broadcast();
-        }
+        forwarding.begin_turn(&socket, &mut gateway)?;
         if let Some(control) = &mut control {
             control
                 .poll_with(start.elapsed(), |request| {
@@ -441,7 +431,7 @@ fn serve(
                 .map_err(|_| "cannot inspect committed node authority")?
                 .is_some_and(|state| state.management_public_key().is_some());
             timers = self::timers(&gateway, managed);
-            incoming.clear();
+            forwarding.clear_ingress();
             enrollment_outgoing.clear();
             if matches!(activation, control::Activation::NewAuthority) {
                 outgoing.clear();
@@ -455,28 +445,19 @@ fn serve(
                 .reset_session()
                 .map_err(|_| "cannot reset committed enrollment transport")?;
             if matches!(activation, control::Activation::NewAuthority) {
-                egress = egress::Runtime::new(&gateway);
+                forwarding.egress = egress::Runtime::new(&gateway);
             } else {
-                egress.configure(&gateway);
+                forwarding.egress.configure(&gateway);
             }
-            mesh = match activation {
-                control::Activation::SameAuthority => mesh.replacement(gateway.projection())?,
+            forwarding.mesh = match activation {
+                control::Activation::SameAuthority => {
+                    forwarding.mesh.replacement(gateway.projection())?
+                }
                 control::Activation::NewAuthority => mesh::Runtime::new(gateway.projection())?,
             };
-            dns.reset();
+            forwarding.dns.reset();
         }
-        let now = Instant::now();
-        egress.poll(&mut gateway);
-        mesh.poll(&mut gateway, &socket, start.elapsed());
-        dns.poll(&mut gateway, start.elapsed());
-        for timer in &mut timers {
-            timer.tick(&mut gateway, now);
-        }
-        if !ingress_first {
-            receive(&socket, &mut gateway, &mut buffer, &mut incoming)?;
-        } else {
-            gateway.advance_broadcast();
-        }
+        forwarding.finish_turn(&socket, &mut gateway, start, &mut timers)?;
         let now = Instant::now();
         let wait = timers
             .iter()
@@ -494,64 +475,11 @@ fn serve(
             wait
         };
         let mut readable = vec![socket.as_fd(), signals.as_fd()];
-        egress.append_fds(&gateway, &mut readable);
+        forwarding.egress.append_fds(&gateway, &mut readable);
         gateway
             .wait_for_activity(&readable, wait)
             .map_err(|_| "cannot wait for node activity")?;
     }
-}
-
-fn receive(
-    socket: &wgfeel_wireguard::UdpListener,
-    gateway: &mut LocalGateway,
-    buffer: &mut [u8],
-    incoming: &mut std::collections::VecDeque<(SocketAddr, Vec<u8>, Instant)>,
-) -> Result<(), &'static str> {
-    // A worker accepts one operation at a time. Preserve bounded encrypted
-    // bursts (notably two relay fragments) rather than deterministically losing
-    // every second datagram. Authentication and current policy are checked when
-    // processing each entry; no plaintext or prior authorization is queued.
-    for _ in 0..incoming.len().min(BATCH) {
-        let (source, packet, deadline) = incoming.pop_front().expect("bounded ingress");
-        if Instant::now() >= deadline {
-            continue;
-        }
-        match gateway.receive_datagram(source, &packet) {
-            Ok(Some(datagram)) => send(socket, datagram),
-            Err(LocalError::Worker(WorkerError::Busy)) => {
-                incoming.push_back((source, packet, deadline))
-            }
-            _ => (),
-        }
-    }
-    for _ in 0..BATCH {
-        match socket.recv_from(buffer) {
-            Ok((length, source)) if length <= MAX_DATAGRAM_SIZE => {
-                match gateway.receive_datagram(source, &buffer[..length]) {
-                    Ok(Some(datagram)) => send(socket, datagram),
-                    Err(LocalError::Worker(WorkerError::Busy)) if incoming.len() < 64 => {
-                        incoming.push_back((
-                            source,
-                            buffer[..length].to_vec(),
-                            Instant::now() + Duration::from_millis(250),
-                        ));
-                    }
-                    _ => (),
-                }
-            }
-            Ok(_) => (),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) =>
-            {
-                break;
-            }
-            Err(_) => return Err("cannot receive node UDP packet"),
-        }
-    }
-    Ok(())
 }
 
 fn send(socket: &wgfeel_wireguard::UdpListener, datagram: EncryptedDatagram) {

@@ -8,6 +8,11 @@ type Api<'a> = dyn Fn(&str, &str, Option<u64>, &[u8]) -> Result<Response> + 'a;
 type Result<T> = std::result::Result<T, &'static str>;
 const IO_ERROR: &str = "cannot read or write terminal";
 
+#[derive(Deserialize)]
+struct Created {
+    id: String,
+}
+
 #[derive(Clone, Deserialize)]
 struct User {
     id: String,
@@ -235,7 +240,7 @@ impl Ui<'_> {
     }
     fn create_device(
         &mut self,
-        user: &User,
+        user_id: &str,
         device_name: &str,
         revision: u64,
         broadcast: Option<bool>,
@@ -245,14 +250,10 @@ impl Ui<'_> {
                 .map_err(|_| "cannot encode request")?;
         let response = self.request(
             "POST",
-            &format!("/api/v1/users/{}/devices", user.id),
+            &format!("/api/v1/users/{user_id}/devices"),
             Some(revision),
             &body,
         )?;
-        #[derive(Deserialize)]
-        struct Created {
-            id: String,
-        }
         let created: Created =
             serde_json::from_slice(&response.body).map_err(|_| "invalid creation response")?;
         writeln!(
@@ -279,12 +280,9 @@ impl Ui<'_> {
         let body = serde_json::to_vec(&serde_json::json!({"name":username, "broadcast":broadcast}))
             .map_err(|_| "cannot encode request")?;
         let response = self.request("POST", "/api/v1/users", Some(revision), &body)?;
-        #[derive(Deserialize)]
-        struct Created {
-            id: String,
-        }
         let created: Created =
             serde_json::from_slice(&response.body).map_err(|_| "invalid creation response")?;
+        valid_id(&created.id)?;
         writeln!(
             self.out,
             "User added: {} ({})",
@@ -292,10 +290,17 @@ impl Ui<'_> {
             created.id
         )
         .map_err(|_| IO_ERROR)?;
-        let (user, revision) = self
-            .select_user(Some(&created.id))?
-            .ok_or("user not found")?;
-        self.create_device(&user, &device_name, revision, None)?;
+        let first_device = response
+            .generation
+            .ok_or("Management omitted revision")
+            .and_then(|revision| self.create_device(&created.id, &device_name, revision, None));
+        if let Err(error) = first_device {
+            writeln!(self.out,
+                "Check the devices with `wgfeel user show {0}`. If the device is missing, run `wgfeel device add --user {0}`.",
+                created.id
+            ).map_err(|_| IO_ERROR)?;
+            return Err(error);
+        }
         self.user_menu(&created.id)
     }
     fn remove_user(&mut self, user: User, revision: u64) -> Result<bool> {
@@ -475,7 +480,7 @@ impl Ui<'_> {
                 Some(5) => self.broadcast(&user, None, Some((revision, Some(!user.broadcast))))?,
                 Some(0) => {
                     if let Some(device_name) = name(self.input, self.out, "Device name: ")? {
-                        let id = self.create_device(&user, &device_name, revision, None)?;
+                        let id = self.create_device(&user.id, &device_name, revision, None)?;
                         self.device_menu(&id)?;
                     } else {
                         return Ok(());
@@ -666,7 +671,7 @@ pub(super) fn run(
                     None => return Ok(()),
                 },
             };
-            let id = ui.create_device(&user, &device_name, revision, broadcast)?;
+            let id = ui.create_device(&user.id, &device_name, revision, broadcast)?;
             ui.device_menu(&id)
         }
         _ => Err(USAGE),
