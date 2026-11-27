@@ -174,6 +174,7 @@ fn mesh_reroutes_through_multiple_relays_and_rejoins_partition_without_main() {
     exchange(&mut clients, 0, 1, 61);
     links.connect_only(&[(0, 1), (1, 2), (2, 4), (0, 3)]);
     exchange(&mut clients, 0, 1, 62);
+    discovery(&mut clients, 0, &[1], 134);
     exchange(&mut clients, 3, 2, 63);
     links.connect_only(&[(0, 3), (3, 2), (2, 4), (0, 1)]);
     exchange(&mut clients, 0, 1, 64);
@@ -356,6 +357,53 @@ fn unified_main_enrolls_children_and_forwards_in_each_traffic_mode() {
         let mut clients = users(&manager, homes);
         exchange(&mut clients, 0, 1, 61);
         exchange(&mut clients, 3, 2, 62);
+        if mode == "entry" {
+            let (user, device) = ids(&manager, "alice", "laptop");
+            let collection = format!("/api/v1/users/{user}/devices");
+            for (name, enabled) in [("receiver", true), ("excluded", false)] {
+                api::json(
+                    &manager.state(),
+                    "POST",
+                    &collection,
+                    serde_json::json!({"name":name,"gateway":first.id,"broadcast":enabled}),
+                );
+            }
+            wait_applied(&manager);
+            // Adding registrations rebuilds the affected tenant worker. Establish the
+            // test sessions on the final membership before exercising policy-only reload.
+            for (i, (owner, name)) in [
+                ("alice", "phone"),
+                ("alice", "laptop"),
+                ("bob", "phone"),
+                ("bob", "laptop"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                clients[i] = Client::from_config(&exported(&manager, owner, name));
+                clients[i].establish();
+            }
+            for name in ["receiver", "excluded"] {
+                let mut client = Client::from_config(&exported(&manager, "alice", name));
+                client.establish();
+                clients.push(client);
+            }
+            discovery(&mut clients, 0, &[1, 4], 145);
+            let path = format!("{collection}/{device}/broadcast");
+            api::json(
+                &manager.state(),
+                "PUT",
+                &path,
+                serde_json::json!({"broadcast":false}),
+            );
+            wait_applied(&manager);
+            discovery(&mut clients, 0, &[4], 155);
+            let excluded = packet(clients[1].address, Ipv4Addr::new(10, 203, 255, 255), 160);
+            clients[1].send(&excluded);
+            no_plaintext(&mut clients);
+            exchange(&mut clients, 1, 0, 67);
+            discovery(&mut clients, 4, &[0], 165);
+        }
         let own = first
             .projection()
             .mesh()

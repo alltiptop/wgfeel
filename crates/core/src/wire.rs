@@ -14,6 +14,8 @@ struct RawConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNetwork {
+    #[serde(default = "default_true")]
+    broadcast: bool,
     id: String,
     devices: Vec<RawDevice>,
     #[serde(default)]
@@ -21,9 +23,13 @@ struct RawNetwork {
     #[serde(default)]
     suspended: bool,
 }
+fn default_true() -> bool {
+    true
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDevice {
+    broadcast: Option<bool>,
     id: String,
     public_key: [u8; 32],
     addresses: Vec<IpAddr>,
@@ -108,11 +114,17 @@ impl Config {
                             DevicePublicKey::new(d.public_key)?,
                             d.addresses,
                         )
-                        .and_then(|device| device.with_gateway(gateway).with_hostname(d.hostname))
+                        .and_then(|device| {
+                            device
+                                .with_broadcast(d.broadcast)
+                                .with_gateway(gateway)
+                                .with_hostname(d.hostname)
+                        })
                     })
                     .collect::<Result<_, _>>()?;
                 Network::new(NetworkId::new(&n.id)?, devices).map(|network| {
                     network
+                        .with_broadcast(n.broadcast)
                         .with_private_lan(n.private_lan)
                         .with_suspended(n.suspended)
                 })

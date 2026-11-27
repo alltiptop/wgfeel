@@ -87,3 +87,18 @@ pub(crate) fn ip_length_for(
     }
     Ok(length)
 }
+
+pub(crate) fn sum(bytes: &[u8]) -> u32 {
+    let (words, tail) = bytes.as_chunks::<2>();
+    let sum: u32 = words
+        .iter()
+        .map(|w| u32::from(u16::from_be_bytes(*w)))
+        .sum();
+    sum + tail.first().map_or(0, |b| u32::from(*b) << 8)
+}
+pub(crate) fn finish(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}

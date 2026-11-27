@@ -83,6 +83,18 @@ fn accept(listener: &UnixListener) -> std::os::unix::net::UnixStream {
 fn dynamic_ids_are_read_only_and_display_only_public_names() {
     for (words, path, body, expected) in [
         (
+            vec!["device", "broadcast", "set", "d"],
+            "/api/v1/users",
+            r#"{"users":[{"id":"u1","name":"Alice","devices":[{"id":"d1","metadata":{"name":"Laptop"},"registration":null}]}]}"#,
+            "d1\tAlice / Laptop\n",
+        ),
+        (
+            vec!["user", "broadcast", "show", "u"],
+            "/api/v1/users",
+            r#"{"users":[{"id":"u1","name":"Alice","devices":[]}]}"#,
+            "u1\tAlice\n",
+        ),
+        (
             vec!["user", "show", "u"],
             "/api/v1/users",
             r#"{"users":[{"id":"u1","name":"Alice\n\u001b[31m","devices":[],"private_key":"must-not-print"}]}"#,
@@ -344,6 +356,23 @@ fn static_completion_selects_commands_flags_and_capability_values() {
     let node = complete(&[""]);
     assert!(node.lines().any(|line| line.starts_with("join\t")));
     assert!(complete(&["device", "add", "--u"]).starts_with("--user\t"));
+    assert_eq!(
+        complete(&["user", "broadcast", "set", "u1", "o"]),
+        "off\t\non\t\n"
+    );
+    assert_eq!(
+        complete(&["device", "broadcast", "set", "d1", "i"]),
+        "inherit\t\n"
+    );
+    assert!(complete(&["user", "broadcast", "set", "u1", "i"]).is_empty());
+    assert_eq!(
+        complete(&["user", "add", "--broadcast", ""]),
+        "off\t\non\t\n"
+    );
+    assert_eq!(
+        complete(&["device", "add", "--broadcast", ""]),
+        "inherit\t\noff\t\non\t\n"
+    );
     assert!(complete(&["install", "--unknown", ""]).is_empty());
     assert_eq!(complete(&["install", "--control", ""]), "child\t\nmain\t\n");
     for words in [

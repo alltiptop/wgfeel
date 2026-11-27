@@ -502,6 +502,9 @@ fn grants_follow_lpm_and_stay_in_the_export_while_the_secret_is_withdrawn() {
         classify(&mut service, endpoint("alpha", "shared"), "8.8.8.8"),
         Destination::Drop
     );
+    for dst in ["255.255.255.255", "224.0.0.251", "ff02::fb"] {
+        assert_eq!(classify(&mut service, src.clone(), dst), Destination::Drop);
+    }
     let path = format!("/api/v1/egresses/{corp}/node");
     assert_eq!(
         json_request(

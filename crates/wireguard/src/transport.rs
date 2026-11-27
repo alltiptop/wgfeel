@@ -66,7 +66,15 @@ impl UdpTransport {
         if gateway.projection().is_none() {
             return Err(TransportError::Forward(ForwardError::MissingProjection));
         }
-        self.poll_with(|source, bytes| {
+        gateway.broadcast_first = !gateway.broadcast_first;
+        if gateway.broadcast_first
+            && let Some(event) = gateway
+                .drain_local_broadcast()
+                .map_err(TransportError::Forward)?
+        {
+            return self.output(Some(event));
+        }
+        let ingress = self.poll_with(|source, bytes| {
             match gateway
                 .receive_local_datagram(source, bytes)
                 .map_err(TransportError::Forward)?
@@ -78,7 +86,14 @@ impl UdpTransport {
                 }
                 event => Ok(event),
             }
-        })
+        })?;
+        if ingress.is_some() {
+            return Ok(ingress);
+        }
+        let continued = gateway
+            .drain_local_broadcast()
+            .map_err(TransportError::Forward)?;
+        self.output(continued)
     }
     /// Consume at most one datagram. Encrypted responses use this same socket;
     /// authenticated inner bytes go only to the caller. None can mean either
@@ -106,7 +121,10 @@ impl UdpTransport {
         if length > MAX_DATAGRAM_SIZE {
             return Err(TransportError::WireGuard(WireGuardError::PacketTooLarge));
         }
-        match receive(source, &buffer[..length])? {
+        self.output(receive(source, &buffer[..length])?)
+    }
+    fn output(&self, event: Option<DatagramEvent>) -> Result<Option<UdpEvent>, TransportError> {
+        match event {
             None => Ok(None),
             Some(DatagramEvent::Plaintext {
                 context,

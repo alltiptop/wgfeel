@@ -306,10 +306,44 @@ fn administration() -> Vec<CommandHelp> {
         ),
         command(
             "user add",
-            "[NAME]",
+            "[NAME] [--broadcast on|off]",
             "Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.",
-            &[("NAME", "Friendly user name; quote names containing spaces.")],
+            &[
+                ("NAME", "Friendly user name; quote names containing spaces."),
+                (
+                    "--broadcast on|off",
+                    "Default directed broadcast policy. Defaults to on.",
+                ),
+            ],
             &["wgfeel user add Alice"],
+        ),
+        command(
+            "user broadcast show",
+            "[ID]",
+            "Show the user's default directed broadcast policy.",
+            &[],
+            &["wgfeel user broadcast show"],
+        ),
+        command(
+            "user broadcast set",
+            "ID on|off",
+            "Set the default directed broadcast policy for this user's devices.",
+            &[],
+            &["wgfeel user broadcast set USER_ID off"],
+        ),
+        command(
+            "device broadcast show",
+            "[ID]",
+            "Show the device override and its effective directed broadcast policy.",
+            &[],
+            &["wgfeel device broadcast show"],
+        ),
+        command(
+            "device broadcast set",
+            "ID on|off|inherit",
+            "Set the device's send and receive policy. Choose inherit to follow the user default.",
+            &[],
+            &["wgfeel device broadcast set DEVICE_ID inherit"],
         ),
         command(
             "user remove",
@@ -320,12 +354,16 @@ fn administration() -> Vec<CommandHelp> {
         ),
         command(
             "device add",
-            "[--user ID] [--name NAME]",
+            "[--user ID] [--name NAME] [--broadcast on|off|inherit]",
             "Create a device in the selected user's network, then open its details. Ask for any omitted user or device name. Import the generated WireGuard configuration into the device's native client.",
             &[
                 (
                     "--user ID",
                     "Owner's user ID; otherwise choose interactively.",
+                ),
+                (
+                    "--broadcast on|off|inherit",
+                    "Override the user default. Defaults to inherit.",
                 ),
                 (
                     "--name NAME",

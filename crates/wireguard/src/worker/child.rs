@@ -62,6 +62,7 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
         )?,
     )?;
     let mut expected_sequence = 1;
+    let mut parked: Option<(u64, crate::broadcast::Packet)> = None;
     loop {
         let request = {
             let frame = protocol::read_frame(&mut reader)?;
@@ -71,7 +72,60 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
             return Err(ProtocolError::InvalidFrame);
         }
         let mut authenticated_peer = None;
+        let mut batch_output = None;
         let outcome = match request.operation {
+            Operation::BroadcastBatch {
+                job,
+                packet,
+                targets,
+                last,
+            } => {
+                if !matches!(context, ContextId::Tenant(_)) {
+                    return Err(ProtocolError::InvalidFrame);
+                }
+                if let Some(packet) = packet {
+                    let ip: [u8; 4] = packet
+                        .as_bytes()
+                        .get(12..16)
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or(ProtocolError::InvalidFrame)?;
+                    parked = Some((
+                        job,
+                        crate::broadcast::Packet::new(packet, ip.into())
+                            .map_err(|_| ProtocolError::InvalidFrame)?,
+                    ));
+                }
+                let mut outputs = Vec::new();
+                for (slot, rewrite) in targets {
+                    let original = &parked
+                        .as_ref()
+                        .filter(|(id, _)| *id == job)
+                        .ok_or(ProtocolError::InvalidFrame)?
+                        .1;
+                    let peer = peer_id(&peers, slot)?;
+                    let scratch;
+                    let bytes = match (peer, rewrite) {
+                        (PeerId::Device(_), Some(ip)) => {
+                            scratch = original.unicast(ip);
+                            scratch.as_bytes()
+                        }
+                        (PeerId::Gateway(_), None) => original.original(),
+                        _ => return Err(ProtocolError::InvalidFrame),
+                    };
+                    match gateway.send(context, peer, bytes) {
+                        Ok(Event::Network { packet, .. }) => {
+                            outputs.push((slot, packet.as_bytes().to_vec()))
+                        }
+                        Err(WireGuardError::NoSession) => (),
+                        _ => return Err(ProtocolError::InvalidFrame),
+                    }
+                }
+                if last && parked.as_ref().is_some_and(|(id, _)| *id == job) {
+                    parked = None;
+                }
+                batch_output = Some(Output::Broadcast(outputs));
+                Ok(None)
+            }
             Operation::Receive { peer, packet } => {
                 let selected = peer.map(|peer| peer_id(&peers, peer)).transpose()?;
                 match framing::datagram_for(&packet, external) {
@@ -128,7 +182,8 @@ fn serve(context: &ContextId) -> Result<(), ProtocolError> {
             Err(error) => Err(error),
             Ok(event) => Ok(event
                 .map(|event| output(context, &peers, event))
-                .transpose()?),
+                .transpose()?
+                .or(batch_output)),
         };
         write_frame(
             &mut writer,

@@ -13,6 +13,7 @@ struct User {
     id: String,
     name: String,
     suspended: bool,
+    broadcast: bool,
     devices: Vec<Device>,
     #[serde(default)]
     egresses: Vec<egress::Assignment>,
@@ -21,6 +22,7 @@ struct User {
 struct Device {
     id: String,
     metadata: Metadata,
+    registration: Option<Broadcast>,
 }
 #[derive(Clone, Deserialize)]
 struct Metadata {
@@ -31,6 +33,32 @@ impl Device {
         self.metadata.name.as_deref().unwrap_or("Unnamed device")
     }
 }
+#[derive(Clone, Deserialize)]
+struct Broadcast {
+    broadcast: Option<bool>,
+    effective_broadcast: bool,
+}
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+impl Broadcast {
+    fn display(&self) -> String {
+        match self.broadcast {
+            Some(value) => on_off(value).into(),
+            None => format!("inherit (currently {})", on_off(self.effective_broadcast)),
+        }
+    }
+}
+fn broadcast_setting(kind: &str, value: &str) -> Result<Option<bool>> {
+    match value {
+        "on" => Ok(Some(true)),
+        "off" => Ok(Some(false)),
+        "inherit" if kind == "device" => Ok(None),
+        _ if kind == "device" => Err("device broadcast must be on, off or inherit"),
+        _ => Err("user broadcast must be on or off"),
+    }
+}
+
 fn clean(text: &str) -> String {
     crate::output::escape(text)
 }
@@ -205,9 +233,16 @@ impl Ui<'_> {
             .select_device(&user)?
             .map(|device| (user, device, revision)))
     }
-    fn create_device(&mut self, user: &User, device_name: &str, revision: u64) -> Result<String> {
-        let body = serde_json::to_vec(&serde_json::json!({"name":device_name}))
-            .map_err(|_| "cannot encode request")?;
+    fn create_device(
+        &mut self,
+        user: &User,
+        device_name: &str,
+        revision: u64,
+        broadcast: Option<bool>,
+    ) -> Result<String> {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"name":device_name, "broadcast":broadcast}))
+                .map_err(|_| "cannot encode request")?;
         let response = self.request(
             "POST",
             &format!("/api/v1/users/{}/devices", user.id),
@@ -229,7 +264,7 @@ impl Ui<'_> {
         .map_err(|_| IO_ERROR)?;
         Ok(created.id)
     }
-    fn add_user(&mut self, supplied: Option<String>) -> Result<()> {
+    fn add_user(&mut self, supplied: Option<String>, broadcast: bool) -> Result<()> {
         let username = match supplied {
             Some(value) => value,
             None => match name(self.input, self.out, "Username: ")? {
@@ -241,7 +276,7 @@ impl Ui<'_> {
             return Ok(());
         };
         let (_, revision) = self.users()?;
-        let body = serde_json::to_vec(&serde_json::json!({"name":username}))
+        let body = serde_json::to_vec(&serde_json::json!({"name":username, "broadcast":broadcast}))
             .map_err(|_| "cannot encode request")?;
         let response = self.request("POST", "/api/v1/users", Some(revision), &body)?;
         #[derive(Deserialize)]
@@ -260,7 +295,7 @@ impl Ui<'_> {
         let (user, revision) = self
             .select_user(Some(&created.id))?
             .ok_or("user not found")?;
-        self.create_device(&user, &device_name, revision)?;
+        self.create_device(&user, &device_name, revision, None)?;
         self.user_menu(&created.id)
     }
     fn remove_user(&mut self, user: User, revision: u64) -> Result<bool> {
@@ -320,6 +355,45 @@ impl Ui<'_> {
         .map_err(|_| IO_ERROR)?;
         Ok(true)
     }
+    fn broadcast(
+        &mut self,
+        user: &User,
+        device: Option<&Device>,
+        change: Option<(u64, Option<bool>)>,
+    ) -> Result<()> {
+        let path = match device {
+            Some(d) => format!("/api/v1/users/{}/devices/{}/broadcast", user.id, d.id),
+            None => format!("/api/v1/users/{}/broadcast", user.id),
+        };
+        let response = if let Some((revision, value)) = change {
+            let body = serde_json::to_vec(&serde_json::json!({"broadcast":value}))
+                .map_err(|_| "cannot encode request")?;
+            self.request("PUT", &path, Some(revision), &body)?
+        } else {
+            self.request("GET", &path, None, b"")?
+        };
+        let status = if device.is_some() {
+            serde_json::from_slice::<Broadcast>(&response.body)
+                .map_err(|_| "invalid device broadcast response")?
+                .display()
+        } else {
+            #[derive(Deserialize)]
+            struct Setting {
+                broadcast: bool,
+            }
+            on_off(
+                serde_json::from_slice::<Setting>(&response.body)
+                    .map_err(|_| "invalid user broadcast response")?
+                    .broadcast,
+            )
+            .into()
+        };
+        writeln!(self.out, "Broadcast: {status}").map_err(|_| IO_ERROR)?;
+        if change.is_some() {
+            writeln!(self.out, "Nodes apply this with the new configuration. Existing /16 profiles need no re-export.").map_err(|_| IO_ERROR)?;
+        }
+        Ok(())
+    }
     fn device_menu(&mut self, id: &str) -> Result<()> {
         loop {
             let Some((user, device, revision)) = self.find_device(Some(id))? else {
@@ -327,11 +401,15 @@ impl Ui<'_> {
             };
             writeln!(
                 self.out,
-                "\n{}: {}\n{}: {}\n1. delete\n\nconfig:",
+                "\n{}: {}\n{}: {}\nBroadcast: {}\n1. delete\n2. broadcast\n\nconfig:",
                 clean(&user.name),
                 user.id,
                 clean(device.name()),
-                device.id
+                device.id,
+                device
+                    .registration
+                    .as_ref()
+                    .map_or_else(|| "unassigned".into(), Broadcast::display)
             )
             .map_err(|_| IO_ERROR)?;
             // The response owns and zeroizes the exported private key; do not deserialize/copy it.
@@ -351,7 +429,17 @@ impl Ui<'_> {
                 )
                 .map_err(|_| IO_ERROR)?;
             }
-            match choice(self.input, self.out, 1)? {
+            match choice(self.input, self.out, 2)? {
+                Some(1) => {
+                    writeln!(self.out, "1. inherit\n2. on\n3. off").map_err(|_| IO_ERROR)?;
+                    if let Some(i) = choice(self.input, self.out, 3)? {
+                        self.broadcast(
+                            &user,
+                            Some(&device),
+                            Some((revision, [None, Some(true), Some(false)][i])),
+                        )?;
+                    }
+                }
                 Some(0) => {
                     if self.remove_device(&user, &device, revision)? {
                         return Ok(());
@@ -368,7 +456,7 @@ impl Ui<'_> {
             };
             writeln!(
                 self.out,
-                "\n{}: {}\nStatus: {}\n1. add device\n2. remove user\n3. {} user\n4. show devices\n5. egresses",
+                "\n{}: {}\nStatus: {}\nBroadcast: {}\n1. add device\n2. remove user\n3. {} user\n4. show devices\n5. egresses\n6. broadcast",
                 clean(&user.name),
                 user.id,
                 if user.suspended {
@@ -376,16 +464,18 @@ impl Ui<'_> {
                 } else {
                     "active"
                 },
+                on_off(user.broadcast),
                 if user.suspended { "resume" } else { "suspend" }
             )
             .map_err(|_| IO_ERROR)?;
             if !user.egresses.is_empty() {
                 self.describe_assignments(&user.egresses, revision)?;
             }
-            match choice(self.input, self.out, 5)? {
+            match choice(self.input, self.out, 6)? {
+                Some(5) => self.broadcast(&user, None, Some((revision, Some(!user.broadcast))))?,
                 Some(0) => {
                     if let Some(device_name) = name(self.input, self.out, "Device name: ")? {
-                        let id = self.create_device(&user, &device_name, revision)?;
+                        let id = self.create_device(&user, &device_name, revision, None)?;
                         self.device_menu(&id)?;
                     } else {
                         return Ok(());
@@ -439,7 +529,7 @@ impl Ui<'_> {
             writeln!(self.out, "1. add user\n2. remove user\n3. show list")
                 .map_err(|_| IO_ERROR)?;
             match choice(self.input, self.out, 3)? {
-                Some(0) => self.add_user(None)?,
+                Some(0) => self.add_user(None, true)?,
                 Some(1) => {
                     if let Some((user, revision)) = self.select_user(None)? {
                         self.remove_user(user, revision)?;
@@ -478,6 +568,39 @@ pub(super) fn run(
         options.positional.remove(0)
     };
     // Validate the entire command before any read, prompt or mutation.
+    if operation == "broadcast" {
+        let (id, set) = match options.positional.as_slice() {
+            [op] if op == "show" => (None, None),
+            [op, id] if op == "show" => (Some(id.clone()), None),
+            [op, id, value] if op == "set" => {
+                (Some(id.clone()), Some(broadcast_setting(kind, value)?))
+            }
+            _ => return Err(USAGE),
+        };
+        if !options.flags.is_empty() {
+            return Err(USAGE);
+        }
+        if let Some(id) = &id {
+            valid_id(id)?;
+        }
+        if kind == "device" {
+            if let Some((user, dev, revision)) = ui.find_device(id.as_deref())? {
+                ui.broadcast(&user, Some(&dev), set.map(|v| (revision, v)))?;
+            }
+        } else if let Some((user, revision)) = ui.select_user(id.as_deref())? {
+            ui.broadcast(&user, None, set.map(|v| (revision, v)))?;
+        }
+        return Ok(());
+    }
+    let broadcast = if operation == "add" {
+        options
+            .take("--broadcast")
+            .map(|s| broadcast_setting(kind, &s))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     let mut user = None;
     let mut supplied_name = None;
     let mut id = None;
@@ -515,7 +638,7 @@ pub(super) fn run(
             }
             Ok(())
         }
-        ("user", "add") => ui.add_user(supplied_name),
+        ("user", "add") => ui.add_user(supplied_name, broadcast.unwrap_or(true)),
         ("user", "remove") => {
             if let Some((user, revision)) = ui.select_user(id.as_deref())? {
                 ui.remove_user(user, revision)?;
@@ -543,7 +666,7 @@ pub(super) fn run(
                     None => return Ok(()),
                 },
             };
-            let id = ui.create_device(&user, &device_name, revision)?;
+            let id = ui.create_device(&user, &device_name, revision, broadcast)?;
             ui.device_menu(&id)
         }
         _ => Err(USAGE),
@@ -562,7 +685,7 @@ mod tests {
                 .borrow_mut()
                 .push((method.to_owned(), path.to_owned(), revision));
             Ok(if method == "GET" {
-                Response { status:200, generation:Some(7), is_config:false, body:br#"{"users":[{"id":"u1","name":"Alice","suspended":false,"devices":[{"id":"d1","metadata":{"name":"laptop"}}]}]}"#.to_vec() }
+                Response { status:200, generation:Some(7), is_config:false, body:br#"{"users":[{"id":"u1","name":"Alice","suspended":false,"broadcast":true,"devices":[{"id":"d1","metadata":{"name":"laptop"}}]}]}"#.to_vec() }
             } else {
                 Response::error(412, "revision_conflict")
             })

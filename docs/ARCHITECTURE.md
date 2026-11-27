@@ -78,6 +78,28 @@ Between entries, tenant packets stay encrypted across intermediate relays;
 relays see only public routing/ACL metadata for their assigned networks. This
 protects transit across relays, not device-to-device end-to-end secrecy.
 
+## Directed UDP broadcast
+
+Each user network stores a directed broadcast default (on at creation). A registered device
+can inherit it or override it in either direction. The effective setting controls both
+sending and receiving. Directed UDP uses the reserved internal address
+`10.203.255.255`. Both endpoints must have internal IPv4 addresses, share the same
+user network and pass the existing directional ACL. Profiles export internal IPv4
+host addresses with a /16 prefix, custom IPv4 with /32 and IPv6 with /128.
+
+The sender targets `10.203.255.255`. Each permitted recipient receives its own
+unicast IP address as the destination. The UDP payload, source address, ports and
+TTL survive forwarding, so a listener can reply to the sender under its reverse ACL.
+An entry sends one tenant-encrypted copy per eligible remote entry. That entry
+rechecks its current policy before delivering to local sessions. IPv4 limited
+broadcast and IPv4/IPv6 multicast, including mDNS, are dropped before egress routing.
+Applications that skip point-to-point interfaces during discovery may need an
+explicit destination to send an announcement.
+
+Each entry limits discovery to 4 packets/s per sender (burst 8), 16 packets/s
+per network (burst 32), and 1,024 copy attempts/s per network (burst 750).
+Offline peers are skipped. Delivery is best effort under load or during policy changes.
+
 ## External WireGuard provider profiles
 
 An egress profile identifies a provider session. Its placement selects an

@@ -18,11 +18,11 @@ impl<'a> Context<'a> {
                 .clients()
                 .iter()
                 .map(|user| user_view(document, user))
-                .collect(),
+                .collect::<Result<_, _>>()?,
         })
     }
     pub fn get_user(&self, user: &str) -> Result<User<'a>, ApiError> {
-        Ok(user_view(self.state.document(), self.user(user)?))
+        user_view(self.state.document(), self.user(user)?)
     }
     pub(super) fn user(&self, id: &str) -> Result<&'a Client, ApiError> {
         self.state
@@ -33,16 +33,22 @@ impl<'a> Context<'a> {
             .ok_or(ApiError(404, "not_found"))
     }
     pub fn list_devices(&self, user: &str) -> Result<Devices<'a>, ApiError> {
+        let client = self.user(user)?;
         Ok(Devices {
-            devices: self.user(user)?.devices(),
+            devices: device_views(client, user_network(self.state.document(), client)?),
         })
     }
-    pub fn get_device(&self, user: &str, device: &str) -> Result<&'a ClientDevice, ApiError> {
-        self.user(user)?
+    pub fn get_device(&self, user: &str, device: &str) -> Result<DeviceView<'a>, ApiError> {
+        let client = self.user(user)?;
+        let catalog = client
             .devices()
             .iter()
-            .find(|entry| entry.id().as_str() == device)
-            .ok_or(ApiError(404, "not_found"))
+            .find(|d| d.id().as_str() == device)
+            .ok_or(ApiError(404, "not_found"))?;
+        Ok(device_view(
+            catalog,
+            user_network(self.state.document(), client)?,
+        ))
     }
     pub fn list_gateways(&self) -> Result<Gateways<'a>, ApiError> {
         let document = self.state.document();
@@ -134,11 +140,71 @@ impl<'a> Context<'a> {
                 ManagementChange::AddClient {
                     client: ClientId::new(&id)?,
                     network: NetworkId::new(&id)?,
+                    broadcast: input.broadcast,
                     name: input.name,
                 },
                 id,
             ))
         })
+    }
+    pub fn get_user_broadcast(&self, user: &str) -> Result<UserBroadcast, ApiError> {
+        Ok(UserBroadcast {
+            broadcast: user_network(self.state.document(), self.user(user)?)?.broadcast(),
+        })
+    }
+    pub fn set_user_broadcast(
+        &mut self,
+        user: &str,
+        input: UserBroadcast,
+    ) -> Result<UserBroadcast, ApiError> {
+        let client = self.user(user)?;
+        let (_, next) = self.change_document(|_, _| {
+            Ok((
+                ManagementChange::SetClientBroadcast {
+                    client: client.id().clone(),
+                    broadcast: input.broadcast,
+                },
+                user.into(),
+            ))
+        })?;
+        Ok(UserBroadcast {
+            broadcast: user_network(&next, client)?.broadcast(),
+        })
+    }
+    pub fn get_device_broadcast(
+        &self,
+        user: &str,
+        device: &str,
+    ) -> Result<DeviceBroadcast, ApiError> {
+        self.get_device(user, device)?
+            .registration
+            .ok_or(ApiError(409, "device_unassigned"))
+    }
+    pub fn set_device_broadcast(
+        &mut self,
+        user: &str,
+        device: &str,
+        input: SetDeviceBroadcast,
+    ) -> Result<DeviceBroadcast, ApiError> {
+        let client = self.user(user)?;
+        let catalog = client
+            .devices()
+            .iter()
+            .find(|d| d.id().as_str() == device)
+            .ok_or(ApiError(404, "not_found"))?;
+        let (_, next) = self.change_document(|_, _| {
+            Ok((
+                ManagementChange::SetDeviceBroadcast {
+                    client: client.id().clone(),
+                    device: catalog.id().clone(),
+                    broadcast: input.broadcast,
+                },
+                device.into(),
+            ))
+        })?;
+        device_view(catalog, user_network(&next, client)?)
+            .registration
+            .ok_or(ApiError(409, "device_unassigned"))
     }
     pub fn delete_user(&mut self, user: &str) -> Result<ChangeReceipt, ApiError> {
         self.change(|_, _| {
@@ -252,19 +318,50 @@ impl<'a> Context<'a> {
     }
 }
 
-fn user_view<'a>(document: &ManagementDocument, client: &'a Client) -> User<'a> {
-    User {
+fn user_network<'a>(
+    document: &'a ManagementDocument,
+    client: &Client,
+) -> Result<&'a Network, ApiError> {
+    document
+        .routing()
+        .config()
+        .networks()
+        .iter()
+        .find(|n| n.id() == client.network())
+        .ok_or(ApiError(500, "missing_network"))
+}
+
+fn device_view<'a>(catalog: &'a ClientDevice, network: &Network) -> DeviceView<'a> {
+    DeviceView {
+        id: catalog.id(),
+        metadata: catalog.metadata(),
+        registration: network
+            .devices()
+            .iter()
+            .find(|d| d.id() == catalog.id())
+            .map(|d| DeviceBroadcast {
+                broadcast: d.broadcast(),
+                effective_broadcast: network.effective_broadcast(d),
+            }),
+    }
+}
+fn device_views<'a>(client: &'a Client, network: &Network) -> Vec<DeviceView<'a>> {
+    client
+        .devices()
+        .iter()
+        .map(|d| device_view(d, network))
+        .collect()
+}
+fn user_view<'a>(document: &ManagementDocument, client: &'a Client) -> Result<User<'a>, ApiError> {
+    let network = user_network(document, client)?;
+    Ok(User {
         id: client.id(),
         name: client.name(),
         egresses: super::egress::assignment_list(document, client.id()).egresses,
-        suspended: document
-            .routing()
-            .config()
-            .networks()
-            .iter()
-            .any(|network| network.id() == client.network() && network.suspended()),
-        devices: client.devices(),
-    }
+        suspended: network.suspended(),
+        broadcast: network.broadcast(),
+        devices: device_views(client, network),
+    })
 }
 
 fn gateway_view<'a>(

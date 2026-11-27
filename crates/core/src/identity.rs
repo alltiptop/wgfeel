@@ -5,7 +5,9 @@ use zeroize::Zeroizing;
 
 macro_rules! identifier {
     ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
+        #[derive(
+            Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema,
+        )]
         #[serde(transparent)]
         pub struct $name(String);
         impl<'de> serde::Deserialize<'de> for $name {

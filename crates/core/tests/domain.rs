@@ -899,3 +899,43 @@ fn errors_have_standard_error_contract_without_input_echo() {
     standard_error(&DomainError::InvalidIdentifier);
     standard_error(&DomainError::InvalidJson);
 }
+
+#[test]
+fn directed_broadcast_reserves_only_the_two_subnet_boundaries() {
+    for address in ["10.203.0.0", "10.203.255.255"] {
+        assert_eq!(
+            Device::new(device_id("pc"), key(1), vec![address.parse().unwrap()]),
+            Err(DomainError::InvalidAddress)
+        );
+    }
+    for address in ["10.203.1.0", "10.203.0.255"] {
+        let pc = device("pc", 1, &[address]);
+        assert_eq!(pc.internal_ipv4(), Some(address.parse().unwrap()));
+    }
+}
+
+#[test]
+fn broadcast_policy_round_trips_and_survives_membership_changes() {
+    let pc = device("pc", 1, &["10.203.1.7"]);
+    let base = network("user", vec![]);
+    assert!(base.broadcast());
+    assert_eq!(pc.broadcast(), None);
+    for (enabled, setting, expected) in [
+        (true, None, true),
+        (true, Some(false), false),
+        (false, None, false),
+        (false, Some(true), true),
+    ] {
+        let net = base
+            .clone()
+            .with_broadcast(enabled)
+            .with_devices(vec![pc.clone().with_broadcast(setting)])
+            .unwrap();
+        let config = Config::new(1, vec![net], policy()).unwrap();
+        let copy = Config::from_json(&config.to_json().unwrap()).unwrap();
+        let net = &copy.networks()[0];
+        assert_eq!(net.broadcast(), enabled);
+        assert_eq!(net.devices()[0].broadcast(), setting);
+        assert_eq!(net.effective_broadcast(&net.devices()[0]), expected);
+    }
+}

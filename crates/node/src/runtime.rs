@@ -326,7 +326,7 @@ fn serve(
         // Alternate admission order: mesh/control output and timers must not
         // monopolize a worker before every queued inbound handshake is read.
         for _ in 0..BATCH {
-            match gateway.poll() {
+            match gateway.poll_ordinary() {
                 Some(LocalEvent::ProviderOutput(datagram)) => egress.send(&mut gateway, datagram),
                 Some(LocalEvent::Network(datagram)) => {
                     if datagram.context == ContextId::Service
@@ -352,6 +352,9 @@ fn serve(
                     generation,
                     ..
                 }) => {
+                    if context == ContextId::Gateway {
+                        mesh.clear_broadcast_assemblies();
+                    }
                     egress.failed(&context);
                     if let Some(timer) = timers.iter_mut().find(|timer| timer.context == context) {
                         timer.failed = true;
@@ -381,6 +384,8 @@ fn serve(
         ingress_first = !ingress_first;
         if ingress_first {
             receive(&socket, &mut gateway, &mut buffer, &mut incoming)?;
+        } else {
+            gateway.advance_broadcast();
         }
         if let Some(control) = &mut control {
             control
@@ -469,6 +474,8 @@ fn serve(
         }
         if !ingress_first {
             receive(&socket, &mut gateway, &mut buffer, &mut incoming)?;
+        } else {
+            gateway.advance_broadcast();
         }
         let now = Instant::now();
         let wait = timers
@@ -481,6 +488,11 @@ fn serve(
                     .map(|(_, due)| due.saturating_duration_since(now))
             })
             .fold(Duration::from_millis(2), Duration::min);
+        let wait = if gateway.has_pending_broadcast() {
+            Duration::ZERO
+        } else {
+            wait
+        };
         let mut readable = vec![socket.as_fd(), signals.as_fd()];
         egress.append_fds(&gateway, &mut readable);
         gateway

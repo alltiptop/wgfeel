@@ -35,14 +35,14 @@ fn models_with_policy(
                     Device::new(
                         DeviceId::new("phone").unwrap(),
                         DevicePublicKey::new([61 + index as u8; 32]).unwrap(),
-                        vec!["10.77.0.2".parse().unwrap()],
+                        vec!["10.203.1.2".parse().unwrap()],
                     )
                     .unwrap()
                     .with_gateway(Some(id("a"))),
                     Device::new(
                         DeviceId::new("laptop").unwrap(),
                         DevicePublicKey::new([71 + index as u8; 32]).unwrap(),
-                        vec!["10.77.0.3".parse().unwrap()],
+                        vec!["10.203.1.3".parse().unwrap()],
                     )
                     .unwrap()
                     .with_gateway(Some(id("c"))),
@@ -509,27 +509,35 @@ fn relay_codec_is_bounded_for_maximum_identifiers_and_rejects_every_truncation()
     let name = "x".repeat(64);
     let network = net(&name);
     let endpoint = Endpoint::new(network.clone(), DeviceId::new(&name).unwrap());
-    let relay = Relay {
-        id: 1,
-        origin: 0,
-        target: 1,
-        network,
-        traffic: Some(MeshTraffic::Device(Traffic {
+    for label in [
+        MeshTraffic::Broadcast(BroadcastTraffic {
+            source: endpoint.clone(),
+            witness: endpoint.clone(),
+        }),
+        MeshTraffic::Device(Traffic {
             source: endpoint.clone(),
             destination: endpoint,
-        })),
-        ttl: 150,
-        total: MAX_DATAGRAM_SIZE,
-    };
-    let packet = relay_packet(1, &relay, 0, &[42; CHUNK]);
-    assert!(packet.as_bytes().len() <= crate::MAX_PLAINTEXT_SIZE);
-    for length in 0..packet.as_bytes().len() {
-        assert!(decode(&packet.as_bytes()[..length]).is_none());
-    }
-    let (_, _, body) = decode(packet.as_bytes()).unwrap();
-    assert!(read_relay(4, body).is_some());
-    for length in 0..body.len() {
-        assert!(read_relay(4, &body[..length]).is_none());
+        }),
+    ] {
+        let relay = Relay {
+            id: 1,
+            origin: 0,
+            target: 1,
+            network: network.clone(),
+            traffic: Some(label),
+            ttl: 150,
+            total: MAX_DATAGRAM_SIZE,
+        };
+        let packet = relay_packet(1, &relay, 0, &[42; CHUNK]);
+        assert!(packet.as_bytes().len() <= crate::MAX_PLAINTEXT_SIZE);
+        for length in 0..packet.as_bytes().len() {
+            assert!(decode(&packet.as_bytes()[..length]).is_none());
+        }
+        let (_, kind, body) = decode(packet.as_bytes()).unwrap();
+        assert!(read_relay(kind, body).is_some());
+        for length in 0..body.len() {
+            assert!(read_relay(kind, &body[..length]).is_none());
+        }
     }
 }
 
@@ -849,4 +857,69 @@ fn typed_provider_traffic_uses_both_direct_and_relay_paths_and_honors_partition(
             );
         }
     }
+}
+
+#[test]
+fn broadcast_fragments_bind_the_witness_and_revision_and_expire_out_of_order() {
+    let mut nodes = models_with_transit(wgfeel_core::TrafficMode::Relay);
+    let links = [[true, true, false], [true, true, true], [false, true, true]];
+    advance(&mut nodes, &links, 0, 3000);
+    let now = Duration::from_secs(3);
+    let label = MeshTraffic::Broadcast(BroadcastTraffic {
+        source: ep("alice", "phone"),
+        witness: ep("alice", "laptop"),
+    });
+    let mut data = vec![73; 1312];
+    data[..4].copy_from_slice(&[4, 0, 0, 0]);
+    let frames = nodes[0].transmit_scoped(&net("alice"), &id("c"), &data, Some(label.clone()), now);
+    assert_eq!(frames.len(), 2);
+    let [first, second] = [0, 1].map(|index| {
+        let Action::Send { node, packet } = &frames[index] else {
+            panic!("expected framed broadcast")
+        };
+        assert_eq!(node, &id("b"));
+        let (generation, kind, body) = decode(packet.as_bytes()).unwrap();
+        let (relay, fragment, chunk) = read_relay(kind, body).unwrap();
+        assert_eq!(
+            (generation, kind, fragment, chunk.len()),
+            (10, 7, index, [1024, 288][index])
+        );
+        assert_eq!(relay.traffic, Some(label.clone()));
+        let hop = nodes[1].receive(
+            &id("a"),
+            "127.0.0.1:10000".parse().unwrap(),
+            packet.as_bytes(),
+            now,
+        );
+        let [Action::Send { node, packet }] = hop.as_slice() else {
+            panic!("relay must forward one fragment")
+        };
+        assert_eq!(node, &id("c"));
+        packet.as_bytes().to_vec()
+    });
+    let target = &mut nodes[2];
+    let receive = |target: &mut Mesh, frame: &[u8], at| {
+        target.receive(&id("b"), "127.0.0.1:10001".parse().unwrap(), frame, at)
+    };
+    assert!(receive(target, &second, now).is_empty());
+    assert!(receive(target, &second, now).is_empty());
+    let later = now + FRAGMENT_LEASE;
+    assert!(
+        receive(target, &first, later).is_empty(),
+        "expired tail cannot complete the frame"
+    );
+    let (_, kind, body) = decode(&second).unwrap();
+    let (mut relay, index, chunk) = read_relay(kind, body).unwrap();
+    let changed = relay_packet(11, &relay, index, chunk);
+    assert!(receive(target, changed.as_bytes(), later).is_empty());
+    for wrong in [ep("alice", "phone"), ep("alice", "missing")] {
+        relay.traffic = Some(MeshTraffic::Broadcast(BroadcastTraffic {
+            source: ep("alice", "phone"),
+            witness: wrong,
+        }));
+        let frame = relay_packet(10, &relay, index, chunk);
+        assert!(receive(target, frame.as_bytes(), later).is_empty());
+    }
+    assert!(matches!(receive(target,&second,later).as_slice(),
+        [Action::Deliver{packet,traffic:Some(t),origin,..}] if t == &label && origin == &id("a") && packet.as_bytes()==data));
 }

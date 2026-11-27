@@ -760,7 +760,28 @@ fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_
         home.clone(),
         Config::new(
             1,
-            vec![Network::new(net.clone(), vec![alice]).unwrap()],
+            vec![
+                Network::new(
+                    net.clone(),
+                    std::iter::once(alice)
+                        .chain(
+                            [("tablet", 24, "10.203.0.10"), ("laptop", 25, "10.203.0.11")].map(
+                                |(name, key, addr)| {
+                                    Device::new(
+                                        device(name),
+                                        public(key),
+                                        vec![addr.parse().unwrap()],
+                                    )
+                                    .unwrap()
+                                    .with_gateway(Some(owner.clone()))
+                                },
+                            ),
+                        )
+                        .collect(),
+                )
+                .unwrap()
+                .with_private_lan(true),
+            ],
             Policy::new(vec![], vec![], vec![]),
         )
         .unwrap(),
@@ -800,7 +821,14 @@ fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_
             .unwrap();
             let mut fixture = Fixture {
                 gateway,
-                clients: vec![Client::new("alice", "phone", 23, 1)],
+                clients: if *node == &owner {
+                    vec![
+                        Client::new("alice", "tablet", 24, 2),
+                        Client::new("alice", "laptop", 25, 2),
+                    ]
+                } else {
+                    vec![Client::new("alice", "phone", 23, 1)]
+                },
             };
             fixture.ready();
             fixture
@@ -839,6 +867,9 @@ fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_
             .unwrap();
     }
     exit.wait_idle(&context);
+    exit.establish(0);
+    exit.establish(1);
+    check_remote_broadcast(&mut entry, &mut exit);
     let packet = udp(false, "10.203.0.9", "203.0.113.23", 64, 73);
     entry.submit(0, &packet);
     let LocalEvent::MeshOutput {
@@ -921,6 +952,82 @@ fn remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_
     };
     assert_eq!(&response[16..20], &[10, 203, 0, 9]);
     assert_eq!(response[8], 62);
+}
+
+fn check_remote_broadcast(entry: &mut Fixture, exit: &mut Fixture) {
+    use wgfeel_wireguard::mesh::{BroadcastTraffic, MeshTraffic, Traffic};
+    let src = "10.203.0.9";
+    let directed = "10.203.255.255";
+    let source = endpoint("alice", "phone");
+    let target = endpoint("alice", "tablet");
+    let broadcast = MeshTraffic::Broadcast(BroadcastTraffic {
+        source: source.clone(),
+        witness: target.clone(),
+    });
+    let unicast = MeshTraffic::Device(Traffic {
+        source: source.clone(),
+        destination: target,
+    });
+    // Both forms of a mismatch must be rejected *after* authenticating the tenant ciphertext.
+    for (dest, override_label) in [
+        (directed, Some(unicast)),
+        ("10.203.0.10", Some(broadcast)),
+        (
+            directed,
+            Some(MeshTraffic::Broadcast(BroadcastTraffic {
+                source: source.clone(),
+                witness: source.clone(),
+            })),
+        ),
+        (directed, None),
+    ] {
+        entry.submit(0, &udp(false, src, dest, 4, 88));
+        let LocalEvent::MeshOutput {
+            packet,
+            traffic: Some(label),
+            peer: home,
+            ..
+        } = entry.event()
+        else {
+            panic!("missing remote tenant packet")
+        };
+        assert_eq!(home, node("owner"));
+        assert_eq!(matches!(label, MeshTraffic::Broadcast(_)), dest == directed);
+        if let Some(label) = override_label {
+            exit.gateway
+                .receive_mesh(
+                    &network("alice"),
+                    &node("home"),
+                    packet.as_bytes(),
+                    Some(label),
+                )
+                .unwrap();
+            exit.wait_idle(&context("alice"));
+        } else {
+            exit.gateway
+                .receive_mesh(
+                    &network("alice"),
+                    &node("home"),
+                    packet.as_bytes(),
+                    Some(label),
+                )
+                .unwrap();
+            for (i, dest) in ["10.203.0.10", "10.203.0.11"].into_iter().enumerate() {
+                let LocalEvent::Network(out) = exit.event() else {
+                    panic!("missing recipient")
+                };
+                let wire = encrypted(out, &exit.clients[i]);
+                exit.clients[i].assert_plaintext(server(), &wire, &udp(false, src, dest, 4, 88));
+            }
+        }
+        for fixture in [&mut *entry, &mut *exit] {
+            let deadline = Instant::now() + WAIT;
+            while fixture.gateway.has_broadcast_jobs() {
+                assert!(fixture.gateway.poll().is_none(), "extra copy or re-relay");
+                assert!(Instant::now() < deadline);
+            }
+        }
+    }
 }
 
 fn projection_pins_and_exact_local_keys_are_required_before_workers_start() {
@@ -1654,6 +1761,144 @@ fn hostile_own_context_plaintext_cannot_bypass_parent_source_policy_or_packet_ch
     }
 }
 
+/// Exercise the normal confined worker and its continuation API with a full tenant.
+fn broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy() {
+    let names = [
+        (0, "sender", 23),
+        (1, "first", 24),
+        (2, "second", 25),
+        (749, "tail", 26),
+    ];
+    let mut devices = Vec::new();
+    let mut clients = Vec::new();
+    for index in 0..750_u16 {
+        let (name, key) = if let Some(&(_, name, key)) = names.iter().find(|(i, _, _)| *i == index)
+        {
+            clients.push(Client::new("lan", name, key, 1));
+            (name.to_owned(), public(key))
+        } else {
+            let mut bytes = [42; 32];
+            bytes[2..4].copy_from_slice(&index.to_be_bytes());
+            (
+                format!("offline-{index}"),
+                DevicePublicKey::new(bytes).unwrap(),
+            )
+        };
+        let ip = Ipv4Addr::from(u32::from(Ipv4Addr::new(10, 203, 1, 0)) + u32::from(index));
+        devices.push(Device::new(device(&name), key, vec![ip.into()]).unwrap());
+    }
+    let lan = network("lan");
+    let assignment = GatewayAssignment::new(
+        node("gateway"),
+        public(9),
+        wgfeel_test_support::fixture_gateway_public(&public(9)),
+        vec![lan.clone()],
+        vec![TenantKeyAssignment::new(lan.clone(), public(1))],
+    )
+    .unwrap();
+    let make = |revision, setting| {
+        let mut devices = devices.clone();
+        devices[1] = devices[1].clone().with_broadcast(setting);
+        let config = Config::new(
+            revision,
+            vec![
+                Network::new(lan.clone(), devices)
+                    .unwrap()
+                    .with_private_lan(true),
+            ],
+            Policy::new(vec![], vec![], vec![]),
+        )
+        .unwrap();
+        ManagementConfig::new(node("management"), config, vec![assignment.clone()])
+            .unwrap()
+            .project_for(&node("gateway"))
+            .unwrap()
+    };
+    let projection = make(1, None);
+    let key = TenantPrivateKey::new(seed(1)).unwrap();
+    let gateway = build(
+        &projection,
+        &node("management"),
+        &node("gateway"),
+        &wgfeel_test_support::fixture_node_keys(seed(9)),
+        &[(lan.clone(), key)],
+    )
+    .unwrap();
+    let mut f = Fixture { gateway, clients };
+    f.ready();
+    for i in 0..4 {
+        f.establish(i);
+    }
+    let addresses = ["10.203.1.0", "10.203.1.1", "10.203.1.2", "10.203.3.237"];
+    let request = udp(false, addresses[0], "10.203.255.255", 1, 71);
+    f.submit(0, &request);
+    let LocalEvent::Network(first) = f.event() else {
+        panic!("expected first copy")
+    };
+    f.clients[1].assert_plaintext(
+        server(),
+        first.packet.as_bytes(),
+        &udp(false, addresses[0], addresses[1], 1, 71),
+    );
+    // Both an undrained result in the first batch and the parked tail belong to revision 1.
+    let next = make(2, Some(false));
+    assert!(f.gateway.can_replace_projection(&next));
+    f.gateway.replace_projection(&next).unwrap();
+    let until = Instant::now() + WAIT;
+    // Revocation cleanup must progress even if ordinary work takes every admission turn.
+    while f.gateway.has_broadcast_jobs() {
+        assert!(f.gateway.poll_ordinary().is_none());
+        assert!(Instant::now() < until);
+    }
+    // Existing sessions remain usable, including the excluded device's unicast path.
+    f.forward(0, 1, &udp(false, addresses[0], addresses[1], 10, 72));
+    // A new packet after refill should reach the last registration. Schedule ordinary
+    // unicast and a session initiation while the remainder of the scan is parked.
+    std::thread::sleep(Duration::from_millis(750));
+    f.submit(0, &request);
+    let LocalEvent::Network(out) = f.event() else {
+        panic!("expected second peer")
+    };
+    f.clients[2].assert_plaintext(
+        server(),
+        out.packet.as_bytes(),
+        &udp(false, addresses[0], addresses[2], 1, 71),
+    );
+    f.forward(1, 0, &udp(false, addresses[1], addresses[0], 10, 73));
+    let context = ContextId::Tenant(lan);
+    f.gateway
+        .initiate_at(&context, &peer("offline-10"), server())
+        .unwrap();
+    let mut handshake = false;
+    let mut tail = false;
+    let start = Instant::now();
+    while !(handshake && tail) {
+        if let Some(event) = f.gateway.poll() {
+            let LocalEvent::Network(out) = event else {
+                panic!("unexpected output {event:?}")
+            };
+            if out.peer == Some(peer("offline-10")) {
+                assert_eq!(out.packet.as_bytes()[..4], [1, 0, 0, 0]);
+                handshake = true;
+            } else {
+                assert_eq!(out.peer, Some(peer("tail")));
+                f.clients[3].assert_plaintext(
+                    server(),
+                    out.packet.as_bytes(),
+                    &udp(false, addresses[0], addresses[3], 1, 71),
+                );
+                tail = true;
+            }
+        }
+        assert!(start.elapsed() < WAIT, "handshake {handshake}, tail {tail}");
+        std::thread::yield_now();
+    }
+    println!(
+        "750-member tenant delivered tail broadcast and handshake in {:?}",
+        start.elapsed()
+    );
+}
+
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     if let Some(status) = hostile_child(&arguments) {
@@ -1663,6 +1908,10 @@ fn main() -> ExitCode {
         return status;
     }
     let cases: &[(&str, fn())] = &[
+        (
+            "broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy",
+            broadcast_at_max_membership_delivers_to_the_tail_and_fences_live_policy,
+        ),
         (
             "remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner",
             remote_egress_requires_typed_inner_wireguard_bound_to_the_authenticated_home_and_owner,

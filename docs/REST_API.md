@@ -109,6 +109,8 @@ Full request/response schemas and error codes are in [openapi.json](openapi.json
 | `GET`, `POST /api/v1/users/{user}/devices` | List or provision devices for a user |
 | `GET`, `DELETE /api/v1/users/{user}/devices/{device}` | Read metadata or delete a device |
 | `GET /api/v1/users/{user}/devices/{device}/config` | Export WireGuard config (`text/plain`, contains private key; optional `/{network}` suffix) |
+| `GET`, `PUT /api/v1/users/{user}/broadcast` | Read or set the default directed broadcast policy |
+| `GET`, `PUT /api/v1/users/{user}/devices/{device}/broadcast` | Read or set a device override |
 | `GET`, `POST /api/v1/egresses` | List profiles or atomically import a provider profile, placement and initial user assignments |
 | `GET`, `PUT`, `DELETE /api/v1/egresses/{egress}` | Read public metadata, replace the provider config or delete the profile |
 | `GET`, `PUT /api/v1/egresses/{egress}/node` | Inspect placement, attach, move or unassign a profile |
@@ -118,6 +120,18 @@ Full request/response schemas and error codes are in [openapi.json](openapi.json
 | `GET`, `DELETE /api/v1/gateways/{gateway}` | Read or remove a registered node |
 | `POST /api/v1/node-invitations` | Issue a one-time child enrollment invitation |
 | `POST /api/v1/token/rotate` | Rotate the bearer token (available over REST with the current bearer token; the CLI `wgfeel token rotate` is local-only) |
+
+## Directed broadcast
+
+User creation accepts an optional boolean `broadcast` (default `true`). A device
+can override it with `true` or `false`. Omit the device setting or pass `null`
+to inherit. PUT requires the `broadcast` key and the current `If-Match`.
+A repeated stored value preserves the revision. Changing an explicit value to
+inherit changes the revision even if the effective policy stays the same.
+
+A device view includes `registration` with `broadcast` and `effective_broadcast`.
+A catalog-only device has `registration: null` and its broadcast subresource
+returns HTTP 409 with `device_unassigned`.
 
 ## Save an external WireGuard profile
 

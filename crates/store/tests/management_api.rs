@@ -411,6 +411,7 @@ fn all_six_changes_and_credential_rotation_preserve_settings_without_public_proj
     let mut store = seed(&directory.state(), true);
     let changes = [
         ManagementChange::AddClient {
+            broadcast: true,
             name: "New user".into(),
             client: ClientId::new("charlie").unwrap(),
             network: network("gamma"),

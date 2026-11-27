@@ -311,17 +311,64 @@ Examples:
 .fi
 .SS user add
 .nf
-\&wgfeel user add [NAME]
+\&wgfeel user add [NAME] [\-\-broadcast on|off]
 .fi
 .PP
 \&Create a user and its isolated network, ask for the first device name, then open the user's menu. IDs, addresses and keys are generated automatically. Names must be nonempty, at most 128 bytes, with no control characters or surrounding whitespace.
 .TP
 .B \&NAME
 \&Friendly user name; quote names containing spaces.
+.TP
+.B \&\-\-broadcast on|off
+\&Default directed broadcast policy. Defaults to on.
 .PP
 Examples:
 .nf
 \&wgfeel user add Alice
+.fi
+.SS user broadcast show
+.nf
+\&wgfeel user broadcast show [ID]
+.fi
+.PP
+\&Show the user's default directed broadcast policy.
+.PP
+Examples:
+.nf
+\&wgfeel user broadcast show
+.fi
+.SS user broadcast set
+.nf
+\&wgfeel user broadcast set ID on|off
+.fi
+.PP
+\&Set the default directed broadcast policy for this user's devices.
+.PP
+Examples:
+.nf
+\&wgfeel user broadcast set USER_ID off
+.fi
+.SS device broadcast show
+.nf
+\&wgfeel device broadcast show [ID]
+.fi
+.PP
+\&Show the device override and its effective directed broadcast policy.
+.PP
+Examples:
+.nf
+\&wgfeel device broadcast show
+.fi
+.SS device broadcast set
+.nf
+\&wgfeel device broadcast set ID on|off|inherit
+.fi
+.PP
+\&Set the device's send and receive policy. Choose inherit to follow the user default.
+.PP
+Examples:
+.nf
+\&wgfeel device broadcast set DEVICE_ID inherit
 .fi
 .SS user remove
 .nf
@@ -339,13 +386,16 @@ Examples:
 .fi
 .SS device add
 .nf
-\&wgfeel device add [\-\-user ID] [\-\-name NAME]
+\&wgfeel device add [\-\-user ID] [\-\-name NAME] [\-\-broadcast on|off|inherit]
 .fi
 .PP
 \&Create a device in the selected user's network, then open its details. Ask for any omitted user or device name. Import the generated WireGuard configuration into the device's native client.
 .TP
 .B \&\-\-user ID
 \&Owner's user ID; otherwise choose interactively.
+.TP
+.B \&\-\-broadcast on|off|inherit
+\&Override the user default. Defaults to inherit.
 .TP
 .B \&\-\-name NAME
 \&Friendly device name; otherwise enter it interactively.

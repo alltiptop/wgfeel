@@ -12,6 +12,8 @@ const CHUNK: usize = 1024;
 const EXTERNAL_CHUNK: usize = 960;
 const _: () = assert!(34 + 12 + 3 * 65 + 18 + 4 + EXTERNAL_CHUNK <= crate::MAX_PLAINTEXT_SIZE);
 const _: () = assert!(MAX_DATAGRAM_SIZE <= 2 * EXTERNAL_CHUNK);
+const _: () = assert!(34 + 12 + 3 * 65 + 4 + CHUNK <= crate::MAX_PLAINTEXT_SIZE);
+const _: () = assert!(MAX_DATAGRAM_SIZE <= 2 * CHUNK);
 const BITS: usize = 19;
 const DEAD: Duration = Duration::from_secs(3);
 const LSA_LEASE: Duration = Duration::from_secs(6);
@@ -37,7 +39,13 @@ pub struct ExternalTraffic {
     pub direction: Direction,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadcastTraffic {
+    pub source: Endpoint,
+    pub witness: Endpoint,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshTraffic {
+    Broadcast(BroadcastTraffic),
     Device(Traffic),
     External(ExternalTraffic),
 }
@@ -62,6 +70,15 @@ pub enum Action {
         packet: PacketBytes,
         traffic: Option<MeshTraffic>,
     },
+}
+impl Action {
+    pub fn is_broadcast(&self) -> bool {
+        match self {
+            Action::Send { packet, .. } => packet.as_bytes().get(33) == Some(&7),
+            Action::Deliver { traffic, .. } => matches!(traffic, Some(MeshTraffic::Broadcast(_))),
+            _ => false,
+        }
+    }
 }
 struct Peer {
     assignment: GatewayAssignment,
@@ -95,13 +112,29 @@ struct Relay {
     ttl: u8,
     total: usize,
 }
+fn chunk_size(kind: u8) -> usize {
+    if matches!(kind, 5 | 6) {
+        EXTERNAL_CHUNK
+    } else {
+        CHUNK
+    }
+}
 impl Relay {
-    fn chunk_size(&self) -> usize {
-        if matches!(self.traffic, Some(MeshTraffic::External(_))) {
-            EXTERNAL_CHUNK
-        } else {
-            CHUNK
+    fn kind(&self) -> u8 {
+        match &self.traffic {
+            Some(MeshTraffic::Broadcast(_)) => 7,
+            Some(MeshTraffic::External(t)) => {
+                if t.direction == Direction::ToEgress {
+                    5
+                } else {
+                    6
+                }
+            }
+            _ => 4,
         }
+    }
+    fn chunk_size(&self) -> usize {
+        chunk_size(self.kind())
     }
 }
 pub struct Mesh {
@@ -114,6 +147,7 @@ pub struct Mesh {
     advertise: Duration,
     packet: u64,
     assemblies: Vec<Assembly>,
+    broadcast_fragments: std::collections::BTreeMap<NetworkId, (Duration, u32)>,
 }
 impl Mesh {
     pub fn new(projection: &GatewayProjection, boot: u64) -> Self {
@@ -147,6 +181,7 @@ impl Mesh {
             sequence: 0,
             advertise: Duration::ZERO,
             packet: boot,
+            broadcast_fragments: Default::default(),
             assemblies: Vec::with_capacity(MAX_ASSEMBLIES),
         }
     }
@@ -161,6 +196,22 @@ impl Mesh {
                 != previous.projection.assignment().gateway_public_key()
         {
             return;
+        }
+        let authority_key = |mesh: &Self| {
+            mesh.projection
+                .mesh()
+                .iter()
+                .find(|n| n.recipient() == mesh.projection.management_id())
+                .map(|n| n.service_public_key().clone())
+        };
+        if authority_key(self) == authority_key(previous) {
+            self.broadcast_fragments.extend(
+                previous
+                    .broadcast_fragments
+                    .iter()
+                    .filter(|(n, _)| self.projection.assignment().networks().contains(n))
+                    .map(|(n, v)| (n.clone(), *v)),
+            );
         }
         self.boot = previous.boot;
         self.sequence = previous.sequence;
@@ -342,6 +393,9 @@ impl Mesh {
             now,
         )
     }
+    pub fn clear_broadcast_assemblies(&mut self) {
+        self.assemblies.retain(|a| a.header.kind() != 7);
+    }
     pub fn transmit_scoped(
         &mut self,
         network: &NetworkId,
@@ -379,7 +433,7 @@ impl Mesh {
         if !self.allowed(&relay, origin) {
             return vec![];
         }
-        if hop == target && !matches!(relay.traffic, Some(MeshTraffic::External(_))) {
+        if hop == target && relay.kind() == 4 {
             return self.peers[target]
                 .active_endpoint
                 .map(|endpoint| {
@@ -454,7 +508,7 @@ impl Mesh {
                 vec![]
             }
             3 => self.advertisement(from, body, packet[8], now),
-            4..=6 => self.relay(from, kind, body, now),
+            4..=7 => self.relay(from, kind, body, now),
             _ => vec![],
         }
     }
@@ -534,6 +588,15 @@ impl Mesh {
             return true;
         };
         let traffic = match traffic {
+            MeshTraffic::Broadcast(t) => {
+                return t.source.network() == &relay.network
+                    && self.projection.broadcast_recipient(
+                        &t.source,
+                        &t.witness,
+                        self.peers[relay.origin].assignment.recipient(),
+                        self.peers[relay.target].assignment.recipient(),
+                    );
+            }
             MeshTraffic::Device(t) => t,
             MeshTraffic::External(t) => {
                 let (home, owner) = match t.direction {
@@ -565,6 +628,32 @@ impl Mesh {
         let Some((mut relay, fragment, chunk)) = read_relay(kind, body) else {
             return vec![];
         };
+        if kind == 7 {
+            if !self
+                .projection
+                .assignment()
+                .networks()
+                .contains(&relay.network)
+                || !self.peers[from]
+                    .assignment
+                    .networks()
+                    .contains(&relay.network)
+            {
+                return vec![];
+            }
+            let (since, count) = self
+                .broadcast_fragments
+                .entry(relay.network.clone())
+                .or_insert((now, 0));
+            if now.saturating_sub(*since) >= Duration::from_secs(1) {
+                *since = now;
+                *count = 0;
+            }
+            if *count >= 64 {
+                return vec![];
+            }
+            *count += 1;
+        }
         if !self.allowed(&relay, from)
             || relay.ttl == 0
             || usize::from(relay.ttl) > self.peers.len()
@@ -617,7 +706,20 @@ impl Mesh {
                 }
                 index
             } else {
-                if self.assemblies.len() == MAX_ASSEMBLIES
+                if (kind == 7
+                    && (self
+                        .assemblies
+                        .iter()
+                        .filter(|e| e.header.kind() == 7)
+                        .count()
+                        >= MAX_ASSEMBLIES / 2
+                        || self
+                            .assemblies
+                            .iter()
+                            .filter(|e| e.header.kind() == 7 && e.header.network == relay.network)
+                            .count()
+                            >= 2))
+                    || self.assemblies.len() == MAX_ASSEMBLIES
                     || self
                         .assemblies
                         .iter()
@@ -752,11 +854,15 @@ fn relay_packet(generation: u64, relay: &Relay, fragment: usize, chunk: &[u8]) -
     body.extend_from_slice(&(relay.origin as u16).to_le_bytes());
     body.extend_from_slice(&(relay.target as u16).to_le_bytes());
     text(&mut body, relay.network.as_str());
-    let kind = match &relay.traffic {
+    let kind = relay.kind();
+    match &relay.traffic {
+        Some(MeshTraffic::Broadcast(t)) => {
+            text(&mut body, t.source.device().as_str());
+            text(&mut body, t.witness.device().as_str());
+        }
         Some(MeshTraffic::Device(t)) => {
             text(&mut body, t.source.device().as_str());
             text(&mut body, t.destination.device().as_str());
-            4
         }
         Some(MeshTraffic::External(t)) => {
             text(&mut body, t.device.device().as_str());
@@ -771,14 +877,9 @@ fn relay_packet(generation: u64, relay: &Relay, fragment: usize, chunk: &[u8]) -
                     body.extend_from_slice(&ip.octets());
                 }
             }
-            match t.direction {
-                Direction::ToEgress => 5,
-                Direction::FromEgress => 6,
-            }
         }
         None => {
             body.extend_from_slice(&[0, 0]);
-            4
         }
     };
     body.push(relay.ttl);
@@ -808,6 +909,10 @@ fn read_relay(kind: u8, body: &[u8]) -> Option<(Relay, usize, &[u8])> {
     let source = name(&mut rest)?;
     let destination = name(&mut rest)?;
     let traffic = match kind {
+        7 => Some(MeshTraffic::Broadcast(BroadcastTraffic {
+            source: Endpoint::new(network.clone(), DeviceId::new(source).ok()?),
+            witness: Endpoint::new(network.clone(), DeviceId::new(destination).ok()?),
+        })),
         4 if source.is_empty() && destination.is_empty() => None,
         4 => Some(MeshTraffic::Device(Traffic {
             source: Endpoint::new(network.clone(), DeviceId::new(source).ok()?),
@@ -851,7 +956,7 @@ fn read_relay(kind: u8, body: &[u8]) -> Option<(Relay, usize, &[u8])> {
         }
         _ => return None,
     };
-    let size = if kind == 4 { CHUNK } else { EXTERNAL_CHUNK };
+    let size = chunk_size(kind);
     if rest.len() < 4 {
         return None;
     }

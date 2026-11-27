@@ -504,13 +504,35 @@ impl GatewayProjection {
     /// Resolve public device ownership in this revision. Callers must still bind
     /// decrypted source addresses to the authenticated device or tenant peer.
     pub fn device(&self, endpoint: &Endpoint) -> Option<&crate::Device> {
+        self.config.registration(endpoint).map(|(_, d)| d)
+    }
+
+    pub(crate) fn broadcast_enabled(&self, endpoint: &Endpoint) -> bool {
         self.config
-            .networks()
-            .iter()
-            .find(|n| n.id() == endpoint.network())?
-            .devices()
-            .iter()
-            .find(|d| d.id() == endpoint.device())
+            .registration(endpoint)
+            .is_some_and(|(network, d)| {
+                d.internal_ipv4().is_some()
+                    && network.effective_broadcast(d)
+                    && (d.gateway().is_some()
+                        || !self.mesh().iter().any(|node| {
+                            node.recipient() != self.recipient()
+                                && node.tenants().iter().any(|t| t.network() == network.id())
+                        }))
+            })
+    }
+
+    pub fn broadcast_recipient(
+        &self,
+        source: &Endpoint,
+        destination: &Endpoint,
+        origin: &NodeId,
+        target: &NodeId,
+    ) -> bool {
+        source.network() == destination.network()
+            && source != destination
+            && self.broadcast_enabled(source)
+            && self.broadcast_enabled(destination)
+            && self.forwarding_decision(source, destination, origin, target) == Action::Allow
     }
 
     /// The same placement and ACL contract at ingress, relay and exit. Relay

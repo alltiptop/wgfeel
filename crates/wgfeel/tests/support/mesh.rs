@@ -280,6 +280,47 @@ fn exchange_with_limits(
         thread::sleep(Duration::from_millis(2));
     }
 }
+/// A single full-MTU discovery datagram must arrive once at every selected peer.
+fn discovery(clients: &mut [Client], source: usize, targets: &[usize], marker: u8) {
+    let from = clients[source].address;
+    let original = packet(from, Ipv4Addr::new(10, 203, 255, 255), marker);
+    let until = Instant::now() + Duration::from_secs(6);
+    // UDP can lose a packet while either entry is busy. Give each attempt its own
+    // payload so delivery to different peers cannot be combined across attempts.
+    let mut trial = marker;
+    loop {
+        let mut bytes = original.clone();
+        bytes[28..].fill(trial);
+        clients[source].send(&bytes);
+        let mut seen = vec![false; clients.len()];
+        let deadline = Instant::now() + Duration::from_millis(350);
+        while Instant::now() < deadline {
+            for (index, client) in clients.iter_mut().enumerate() {
+                for received in client.poll() {
+                    assert!(
+                        targets.contains(&index),
+                        "discovery leaked to client {index}"
+                    );
+                    if received[28] != trial {
+                        continue;
+                    }
+                    assert_eq!(received, packet(from, client.address, trial));
+                    assert!(!seen[index], "duplicate delivery");
+                    seen[index] = true;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        if targets.iter().all(|&i| seen[i]) {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "missing discovery delivery, received {seen:?}"
+        );
+        trial = trial.wrapping_add(1);
+    }
+}
 fn no_plaintext(clients: &mut [Client]) {
     let until = Instant::now() + Duration::from_millis(300);
     while Instant::now() < until {
@@ -432,6 +473,9 @@ fn main_entry(measure_auth: bool) {
     }
     exchange_with_limits(&mut clients, 0, 1, 71, 1, Duration::from_secs(5));
     exchange_with_limits(&mut clients, 1, 0, 72, 1, Duration::from_secs(5));
+    if !measure_auth {
+        discovery(&mut clients, 0, &[1], 131);
+    }
     if measure_auth {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use std::io::{Read, Write};
@@ -592,6 +636,7 @@ fn scenario(long_outage: bool) {
     thread::sleep(Duration::from_secs(5));
     exchange(&mut clients, 0, 1, 21);
     exchange(&mut clients, 3, 2, 22);
+    discovery(&mut clients, 0, &[1], 141);
     if long_outage {
         links.connect_only(&[]);
         let until = Instant::now() + Duration::from_secs(105);

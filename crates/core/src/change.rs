@@ -12,6 +12,16 @@ pub enum ManagementChange {
         client: ClientId,
         network: NetworkId,
         name: String,
+        broadcast: bool,
+    },
+    SetClientBroadcast {
+        client: ClientId,
+        broadcast: bool,
+    },
+    SetDeviceBroadcast {
+        client: ClientId,
+        device: DeviceId,
+        broadcast: Option<bool>,
     },
     SetClientSuspended {
         client: ClientId,
@@ -67,6 +77,7 @@ pub enum ManagementChangeError {
     GenerationExhausted,
     UnknownClient,
     UnknownDevice,
+    DeviceUnassigned,
     NetworkNotOwned,
     DuplicateClient,
     DuplicateDevice,
@@ -130,7 +141,14 @@ impl ManagementDocument {
         }
         let generation = expected_generation
             .checked_add(1)
-            .ok_or(ManagementChangeError::GenerationExhausted)?;
+            .ok_or(ManagementChangeError::GenerationExhausted);
+        if !matches!(
+            change,
+            ManagementChange::SetClientBroadcast { .. }
+                | ManagementChange::SetDeviceBroadcast { .. }
+        ) {
+            generation?;
+        }
         let mut clients = self.clients().to_vec();
         let mut networks = self.routing().config().networks().to_vec();
         let mut assignments = self.routing().assignments().to_vec();
@@ -189,7 +207,7 @@ impl ManagementDocument {
                     if egress.reservation(&profile.interface_public_key).is_some() {
                         return Err(DomainError::EgressKeyPendingWithdrawal.into());
                     }
-                    egress.reserve(&old, self.routing(), generation)?;
+                    egress.reserve(&old, self.routing(), generation?)?;
                 }
                 egress.profiles[i] = (**profile).clone().with_placement(old.node.clone(), None)?;
             }
@@ -205,7 +223,7 @@ impl ManagementDocument {
                     return Ok(None);
                 }
                 let next = if old.node.is_some() {
-                    egress.reserve(&old, self.routing(), generation)?;
+                    egress.reserve(&old, self.routing(), generation?)?;
                     old.with_placement(None, node.clone())?
                 } else if node.is_some() && egress.reservation(&old.interface_public_key).is_some()
                 {
@@ -254,7 +272,7 @@ impl ManagementDocument {
                 }
                 let i = egress.index(id)?;
                 let old = egress.profiles.remove(i);
-                egress.reserve(&old, self.routing(), generation)?;
+                egress.reserve(&old, self.routing(), generation?)?;
             }
             ManagementChange::SetGatewayContact {
                 gateway,
@@ -274,6 +292,7 @@ impl ManagementDocument {
                 client,
                 network,
                 name,
+                broadcast,
             } => {
                 if clients
                     .iter()
@@ -285,7 +304,42 @@ impl ManagementDocument {
                     Client::new(client.clone(), vec![network.clone()], vec![])?
                         .with_name(name.clone())?,
                 );
-                networks.push(Network::new(network.clone(), vec![])?);
+                networks.push(Network::new(network.clone(), vec![])?.with_broadcast(*broadcast));
+            }
+            ManagementChange::SetClientBroadcast { client, broadcast } => {
+                let owner = &clients[client_index(&clients, client)?];
+                let network = networks
+                    .iter_mut()
+                    .find(|n| n.id() == owner.network())
+                    .ok_or(ManagementChangeError::NetworkNotOwned)?;
+                if network.broadcast() == *broadcast {
+                    return Ok(None);
+                }
+                *network = network.clone().with_broadcast(*broadcast);
+            }
+            ManagementChange::SetDeviceBroadcast {
+                client,
+                device,
+                broadcast,
+            } => {
+                let owner = &clients[client_index(&clients, client)?];
+                if !owner.devices().iter().any(|d| d.id() == device) {
+                    return Err(ManagementChangeError::UnknownDevice);
+                }
+                let network = networks
+                    .iter_mut()
+                    .find(|n| n.id() == owner.network())
+                    .ok_or(ManagementChangeError::NetworkNotOwned)?;
+                let mut devices = network.devices().to_vec();
+                let registration = devices
+                    .iter_mut()
+                    .find(|d| d.id() == device)
+                    .ok_or(ManagementChangeError::DeviceUnassigned)?;
+                if registration.broadcast() == *broadcast {
+                    return Ok(None);
+                }
+                *registration = registration.clone().with_broadcast(*broadcast);
+                *network = network.with_devices(devices)?;
             }
             ManagementChange::SetClientSuspended { client, suspended } => {
                 let owner = &clients[client_index(&clients, client)?];
@@ -412,7 +466,7 @@ impl ManagementDocument {
         };
         let routing = ManagementConfig::new(
             self.routing().management_id().clone(),
-            Config::new(generation, networks, policy)?,
+            Config::new(generation?, networks, policy)?,
             assignments,
         )?;
         Ok(Some(Draft {

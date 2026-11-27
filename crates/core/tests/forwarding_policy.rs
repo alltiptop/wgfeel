@@ -24,7 +24,7 @@ fn config(private: bool, suspended: bool, deny: bool) -> ManagementConfig {
                     Device::new(
                         DeviceId::new(id).unwrap(),
                         key((index * 3 + i + 1) as u8),
-                        vec![format!("10.1.0.{}", i + 1).parse().unwrap()],
+                        vec![format!("10.203.1.{}", i + 1).parse().unwrap()],
                     )
                     .unwrap()
                     .with_gateway(Some(node(home)))
@@ -98,6 +98,17 @@ fn one_policy_contract_covers_ingress_relay_and_exit_and_binds_device_homes() {
         let config = config(private, suspended, deny);
         for recipient in ["a", "relay", "b"] {
             let projection = config.project_mesh_for(&node(recipient)).unwrap();
+            assert_eq!(
+                projection.broadcast_recipient(&source, &destination, &node("a"), &node("b")),
+                expected == Action::Allow
+            );
+            assert!(!projection.broadcast_recipient(&source, &destination, &node("b"), &node("a")));
+            assert!(!projection.broadcast_recipient(
+                &source,
+                &endpoint("bob", "laptop"),
+                &node("a"),
+                &node("b")
+            ));
             assert_eq!(
                 projection.forwarding_decision(&source, &destination, &node("a"), &node("b")),
                 expected

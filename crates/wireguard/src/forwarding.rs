@@ -29,10 +29,17 @@ impl fmt::Display for ForwardError {
 }
 impl std::error::Error for ForwardError {}
 
+pub(crate) struct LocalBroadcast {
+    scan: crate::broadcast::Scan,
+    packet: crate::broadcast::Packet,
+    outputs: std::collections::VecDeque<DatagramEvent>,
+    last: bool,
+}
+
 impl Gateway {
     /// Authenticate one encrypted datagram and forward permitted tenant traffic
-    /// directly to an established local peer. No plaintext or caller-supplied
-    /// identity is accepted at this boundary, and no payload is queued.
+    /// directly to established local peers. Directed broadcast can leave bounded
+    /// continuation work for `drain_local_broadcast`.
     pub fn receive_local_datagram(
         &mut self,
         source: SocketAddr,
@@ -49,9 +56,83 @@ impl Gateway {
                 context,
                 peer,
                 packet,
-            }) => self.forward_local(context, peer, packet).map(Some),
+            }) => {
+                if let (ContextId::Tenant(network), PeerId::Device(id)) = (&context, &peer)
+                    && packet.as_bytes().get(16..20)
+                        == Some(&wgfeel_core::INTERNAL_BROADCAST_IPV4.octets())
+                    && packet.as_bytes()[0] >> 4 == 4
+                {
+                    if self.broadcast_jobs.len() >= crate::broadcast::MAX_JOBS
+                        || self
+                            .broadcast_jobs
+                            .iter()
+                            .any(|j| j.scan.source.network() == network)
+                    {
+                        return Ok(None);
+                    }
+                    let projection = self
+                        .projection
+                        .as_ref()
+                        .ok_or(ForwardError::MissingProjection)?;
+                    let source = Endpoint::new(network.clone(), id.clone());
+                    let (scan, packet) = crate::broadcast::Scan::start(
+                        projection,
+                        source,
+                        projection.recipient(),
+                        packet,
+                        &mut self.broadcast_limits,
+                        std::time::Instant::now(),
+                    )?;
+                    self.broadcast_jobs.push_back(LocalBroadcast {
+                        scan,
+                        packet,
+                        outputs: Default::default(),
+                        last: false,
+                    });
+                    self.drain_local_broadcast()
+                } else {
+                    self.forward_local(context, peer, packet).map(Some)
+                }
+            }
             event => Ok(event),
         }
+    }
+
+    /// Advance one local discovery job and publish at most one encrypted datagram.
+    pub fn drain_local_broadcast(&mut self) -> Result<Option<DatagramEvent>, ForwardError> {
+        let Some(mut job) = self.broadcast_jobs.pop_front() else {
+            return Ok(None);
+        };
+        let now = std::time::Instant::now();
+        if now >= job.scan.expires {
+            return Ok(None);
+        }
+        if job.outputs.is_empty() && !job.last {
+            let projection = self
+                .projection
+                .as_ref()
+                .ok_or(ForwardError::MissingProjection)?;
+            let ctx = ContextId::Tenant(job.scan.source.network().clone());
+            let online = |peer: &PeerId| self.endpoint(&ctx, peer).ok().flatten().is_some();
+            let (mut targets, last) = job.scan.next(projection, online, false, now);
+            let exhausted =
+                self.broadcast_limits
+                    .charge_batch(job.scan.source.network(), &mut targets, now);
+            job.last = last || exhausted;
+            for target in targets {
+                let ip = target.rewrite.ok_or(ForwardError::NotLocal)?;
+                match self.send_datagram(&ctx, &target.peer, job.packet.unicast(ip).as_bytes()) {
+                    Ok(event) => job.outputs.push_back(event),
+                    Err(WireGuardError::NoEndpoint | WireGuardError::NoSession) => (),
+                    Err(e) => return Err(ForwardError::WireGuard(e)),
+                }
+            }
+        }
+        let result = job.outputs.pop_front();
+        if !job.last || !job.outputs.is_empty() {
+            self.broadcast_jobs.push_back(job);
+        }
+        Ok(result)
     }
 
     fn forward_local(

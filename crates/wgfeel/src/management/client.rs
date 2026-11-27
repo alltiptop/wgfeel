@@ -16,14 +16,18 @@ const USAGE: &str = "usage:
   wgfeel user
   wgfeel user list
   wgfeel user show [ID]
-  wgfeel user add [NAME]
+  wgfeel user add [NAME] [--broadcast on|off]
+  wgfeel user broadcast show [ID]
+  wgfeel user broadcast set ID on|off
   wgfeel user remove [--id ID]
 
   wgfeel egress [add|list|show|node|replace|delete]
   wgfeel user egress list|set|remove
 
   wgfeel device show [ID]
-  wgfeel device add [--user ID] [--name NAME]
+  wgfeel device add [--user ID] [--name NAME] [--broadcast on|off|inherit]
+  wgfeel device broadcast show [ID]
+  wgfeel device broadcast set ID on|off|inherit
   wgfeel device delete [ID]
 
   wgfeel node list

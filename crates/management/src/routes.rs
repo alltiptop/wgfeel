@@ -6,7 +6,6 @@ use super::{
     operations::Context,
 };
 use serde::Deserialize;
-use wgfeel_core::ClientDevice;
 use wgfeel_store::StoredManagement;
 
 const PREFIX: &str = "/api/v1/";
@@ -203,6 +202,18 @@ routes! {
         /// Remove the user and their network.
         Delete delete_user(user) -> ChangeReceipt, errors(404, 409, 422);
     }
+    ["users", {user}, "broadcast"] {
+        /// Read the user's default directed broadcast policy.
+        Read get_user_broadcast(user) -> UserBroadcast, errors(404);
+        /// Set the user's default directed broadcast policy.
+        Replace set_user_broadcast(user; UserBroadcast) -> UserBroadcast, errors(404);
+    }
+    ["users", {user}, "devices", {device}, "broadcast"] {
+        /// Read the device override and effective directed broadcast policy.
+        Read get_device_broadcast(user, device) -> DeviceBroadcast, errors(404, 409);
+        /// Set the device override. Null restores inheritance.
+        Replace set_device_broadcast(user, device; SetDeviceBroadcast) -> DeviceBroadcast, errors(404, 409);
+    }
     ["users", {user}, "suspend"] {
         /// Suspend traffic on the user's network.
         Suspension suspend_user(user; EmptyObject) -> ChangeReceipt, errors(404, 409, 422);
@@ -219,7 +230,7 @@ routes! {
     }
     ["users", {user}, "devices", {device}] {
         /// Get the device ID and metadata.
-        Read get_device(user, device) -> &'_ ClientDevice, errors(404);
+        Read get_device(user, device) -> DeviceView<'_>, errors(404);
         /// Remove this device from the user's network.
         Delete delete_device(user, device) -> ChangeReceipt, errors(404, 409, 422);
     }

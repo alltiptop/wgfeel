@@ -8,7 +8,8 @@ mod supervisor;
 
 use crate::{ContextId, DatagramEvent, WireGuardError};
 pub use local::{
-    DnsSource, EncryptedDatagram, LocalError, LocalEvent, LocalGateway, same_provider_session,
+    DnsSource, EncryptedDatagram, LocalError, LocalEvent, LocalGateway, WorkerLease,
+    same_provider_session,
 };
 use std::{ffi::OsString, fmt, process::ExitCode, time::Duration};
 pub use supervisor::WorkerGateway;
@@ -54,6 +55,10 @@ pub enum WorkerEvent {
     Ready {
         context: ContextId,
         generation: u64,
+    },
+    BroadcastCompleted {
+        request: RequestId,
+        results: Vec<(EncryptedDatagram, Option<crate::mesh::BroadcastTraffic>)>,
     },
     Completed {
         request: RequestId,

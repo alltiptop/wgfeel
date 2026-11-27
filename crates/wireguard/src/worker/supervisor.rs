@@ -53,7 +53,16 @@ struct Pending {
     request: RequestId,
     operation: Expected,
 }
+struct BatchDestination {
+    slot: u16,
+    destination: SocketAddr,
+    label: Option<crate::mesh::BroadcastTraffic>,
+}
 enum Expected {
+    BroadcastBatch {
+        targets: Vec<BatchDestination>,
+        data_len: usize,
+    },
     Receive {
         peer: Option<u16>,
         kind: u8,
@@ -82,7 +91,7 @@ enum Expected {
 impl Expected {
     fn peer(&self) -> Option<u16> {
         match self {
-            Self::SetServicePeers { .. } => None,
+            Self::SetServicePeers { .. } | Self::BroadcastBatch { .. } => None,
             Self::Receive { peer, .. } => *peer,
             Self::Initiate { peer, .. }
             | Self::Send { peer, .. }
@@ -97,7 +106,7 @@ impl Expected {
                 Some(*destination)
             }
             Self::Tick { destination, .. } => *destination,
-            Self::Reset { .. } | Self::SetServicePeers { .. } => None,
+            Self::Reset { .. } | Self::SetServicePeers { .. } | Self::BroadcastBatch { .. } => None,
         }
     }
 }
@@ -541,6 +550,53 @@ impl WorkerGateway {
             Expected::Send { peer, destination },
         )
     }
+    pub(super) fn broadcast_batch(
+        &mut self,
+        context: &ContextId,
+        job: u64,
+        packet: Option<crate::PacketBytes>,
+        targets: Vec<crate::broadcast::Target>,
+        last: bool,
+        data_len: usize,
+    ) -> Result<RequestId, WorkerError> {
+        if !matches!(context, ContextId::Tenant(_)) || targets.len() > crate::broadcast::BATCH {
+            return Err(WorkerError::InvalidConfiguration);
+        }
+        let slot = self.slot(context)?;
+        let mut expected = vec![];
+        let mut selected = vec![];
+        for target in targets {
+            let (_, index) = self.select(context, &target.peer)?;
+            if let Some(destination) = self.workers[slot].peers[usize::from(index)].endpoint {
+                selected.push((index, target.rewrite));
+                expected.push(BatchDestination {
+                    slot: index,
+                    destination,
+                    label: target.label,
+                });
+            }
+        }
+        self.submit(
+            slot,
+            Operation::BroadcastBatch {
+                job,
+                packet,
+                targets: selected,
+                last,
+            },
+            Expected::BroadcastBatch {
+                targets: expected,
+                data_len,
+            },
+        )
+    }
+    pub(super) fn incarnation(&self, context: &ContextId) -> Option<u64> {
+        Some(self.workers[self.slot(context).ok()?].generation)
+    }
+    pub(super) fn ready_for(&self, context: &ContextId) -> bool {
+        self.slot(context)
+            .is_ok_and(|i| self.workers[i].ready().is_ok())
+    }
     pub fn tick(&mut self, context: &ContextId, peer: &PeerId) -> Result<RequestId, WorkerError> {
         let (slot, peer) = self.select(context, peer)?;
         let destination = self.workers[slot].peers[usize::from(peer)].endpoint;
@@ -792,7 +848,7 @@ impl WorkerGateway {
         let Phase::Pending(pending) = &worker.phase else {
             return Err(WorkerError::Protocol);
         };
-        validate_reply(worker, pending, &reply)?;
+        validate_reply(worker.peers.len(), pending, &reply)?;
         if let Expected::SetServicePeers { peers } = &pending.operation
             && matches!(reply.outcome, Ok(None))
         {
@@ -859,9 +915,37 @@ impl WorkerGateway {
             worker.peers[usize::from(*peer)].endpoint = None;
             worker.provider_authenticated = None;
         }
+        if let Ok(Some(Output::Broadcast(outputs))) = reply.outcome {
+            let Expected::BroadcastBatch { targets, .. } = pending.operation else {
+                return Err(WorkerError::Protocol);
+            };
+            let results = outputs
+                .into_iter()
+                .map(|(peer, bytes)| {
+                    let target = targets
+                        .iter()
+                        .find(|t| t.slot == peer)
+                        .ok_or(WorkerError::Protocol)?;
+                    Ok((
+                        super::EncryptedDatagram {
+                            context: worker.context.clone(),
+                            peer: Some(worker.peers[usize::from(peer)].id.clone()),
+                            destination: target.destination,
+                            packet: PacketBytes(bytes),
+                        },
+                        target.label.clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, WorkerError>>()?;
+            return Ok(Some(WorkerEvent::BroadcastCompleted {
+                request: pending.request,
+                results,
+            }));
+        }
         let result = reply.outcome.and_then(|output| {
             output
                 .map(|output| match output {
+                    Output::Broadcast(_) => unreachable!("batch returned above"),
                     Output::Network { peer, packet } => Ok(DatagramEvent::Network {
                         destination: pending
                             .operation
@@ -962,10 +1046,14 @@ fn validate_options(options: WorkerOptions) -> Result<(), WorkerError> {
     Ok(())
 }
 /// Validate all output metadata and bytes before the registry can be changed.
-fn validate_reply(worker: &Worker, pending: &Pending, reply: &Reply) -> Result<(), WorkerError> {
+fn validate_reply(
+    configured_peers: usize,
+    pending: &Pending,
+    reply: &Reply,
+) -> Result<(), WorkerError> {
     let peer_count = match &pending.operation {
         Expected::SetServicePeers { peers } if matches!(reply.outcome, Ok(None)) => peers.len(),
-        _ => worker.peers.len(),
+        _ => configured_peers,
     };
     if reply.sequence != pending.request.sequence
         || reply.indices.len() > peer_count * MAX_INDICES_PER_PEER
@@ -977,13 +1065,31 @@ fn validate_reply(worker: &Worker, pending: &Pending, reply: &Reply) -> Result<(
         return Err(WorkerError::Protocol);
     }
     let expected = &pending.operation;
+    if let Expected::BroadcastBatch { targets, data_len } = expected {
+        let Ok(Some(Output::Broadcast(outputs))) = &reply.outcome else {
+            return Err(WorkerError::Protocol);
+        };
+        if reply.authenticated_peer.is_some() || outputs.len() > targets.len() {
+            return Err(WorkerError::Protocol);
+        }
+        for (i, (slot, packet)) in outputs.iter().enumerate() {
+            if !targets.iter().any(|t| t.slot == *slot)
+                || outputs[..i].iter().any(|(s, _)| s == slot)
+                || packet.get(..4) != Some(&[4, 0, 0, 0])
+                || packet.len() != 32 + data_len.next_multiple_of(16)
+            {
+                return Err(WorkerError::Protocol);
+            }
+        }
+        return Ok(());
+    }
     if matches!(expected, Expected::SetServicePeers { .. })
         && (reply.authenticated_peer.is_some() || matches!(reply.outcome, Ok(Some(_))))
     {
         return Err(WorkerError::Protocol);
     }
     if let Some(peer) = reply.authenticated_peer {
-        if usize::from(peer) >= worker.peers.len()
+        if usize::from(peer) >= configured_peers
             || expected.peer().is_some_and(|expected| expected != peer)
             || !matches!(
                 expected,
@@ -1023,14 +1129,16 @@ fn validate_reply(worker: &Worker, pending: &Pending, reply: &Reply) -> Result<(
         return Ok(());
     };
     let peer = match output {
+        Output::Broadcast(_) => return Err(WorkerError::Protocol),
         Output::Network { peer, .. } | Output::Plaintext { peer, .. } => *peer,
     };
-    if usize::from(peer) >= worker.peers.len()
+    if usize::from(peer) >= configured_peers
         || expected.peer().is_some_and(|expected| expected != peer)
     {
         return Err(WorkerError::Protocol);
     }
     match output {
+        Output::Broadcast(_) => return Err(WorkerError::Protocol),
         Output::Plaintext { packet, .. } => {
             if !matches!(expected, Expected::Receive { kind: 4, .. })
                 || reply.authenticated_peer != Some(peer)
@@ -1040,7 +1148,7 @@ fn validate_reply(worker: &Worker, pending: &Pending, reply: &Reply) -> Result<(
             framing::ip_length_for(
                 packet,
                 false,
-                matches!(worker.context, ContextId::External(_)),
+                matches!(pending.request.context, ContextId::External(_)),
             )
             .map_err(|_| WorkerError::Protocol)?;
         }
@@ -1085,4 +1193,74 @@ fn index_at(bytes: &[u8], offset: usize) -> u32 {
         bytes[offset + 2],
         bytes[offset + 3],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_reply_is_validated_in_full_before_publication() {
+        let pending = Pending {
+            request: RequestId {
+                context: ContextId::Tenant(wgfeel_core::NetworkId::new("lan").unwrap()),
+                generation: 1,
+                sequence: 7,
+            },
+            operation: Expected::BroadcastBatch {
+                targets: [1, 2]
+                    .map(|slot| BatchDestination {
+                        slot,
+                        destination: "127.0.0.1:10001".parse().unwrap(),
+                        label: None,
+                    })
+                    .into(),
+                data_len: 31,
+            },
+        };
+        let mut valid = vec![0; 64];
+        valid[0] = 4;
+        let batch = |entries| Reply {
+            sequence: 7,
+            indices: vec![],
+            authenticated_peer: None,
+            outcome: Ok(Some(Output::Broadcast(entries))),
+        };
+        assert_eq!(
+            validate_reply(3, &pending, &batch(vec![(2, valid.clone())])),
+            Ok(())
+        );
+        let mut control = valid.clone();
+        control[0] = 1;
+        for reply in [
+            batch(vec![(1, valid.clone()), (1, valid.clone())]),
+            batch(vec![(0, valid.clone())]),
+            batch(vec![(1, valid.clone()), (2, control)]),
+            batch(vec![(1, vec![4; 63])]),
+            Reply {
+                sequence: 8,
+                ..batch(vec![])
+            },
+            Reply {
+                authenticated_peer: Some(1),
+                ..batch(vec![])
+            },
+            Reply {
+                indices: vec![protocol::Binding { peer: 3, index: 1 }],
+                ..batch(vec![])
+            },
+            Reply {
+                outcome: Ok(Some(Output::Plaintext {
+                    peer: 1,
+                    packet: vec![],
+                })),
+                ..batch(vec![])
+            },
+        ] {
+            assert_eq!(
+                validate_reply(3, &pending, &reply),
+                Err(WorkerError::Protocol)
+            );
+        }
+    }
 }

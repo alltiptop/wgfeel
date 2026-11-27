@@ -146,6 +146,7 @@ pub(super) fn device(
     let hostname = hostname(&value.name, registrations)?;
     let device = Device::new(device_id.clone(), public, addresses)?
         .with_gateway(gateway)
+        .with_broadcast(value.broadcast)
         .with_hostname(Some(hostname))?;
     if let Some(private) = private {
         secrets
@@ -360,7 +361,11 @@ pub(super) fn export(
         write!(
             output,
             "{address}/{}",
-            if address.is_ipv4() { 32 } else { 128 }
+            if IpPrefix::internal_v4().contains(*address) {
+                IpPrefix::internal_v4().length()
+            } else {
+                IpPrefix::host(*address).length()
+            }
         )
         .map_err(|_| ApiError(500, "encoding_failed"))?;
     }

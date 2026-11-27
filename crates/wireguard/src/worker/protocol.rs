@@ -14,6 +14,9 @@ use zeroize::Zeroizing;
 mod tests;
 
 pub(super) const MAX_FRAME_BYTES: usize = 131_072;
+const _: () = assert!(
+    16 + MAX_BINDINGS * 6 + crate::broadcast::BATCH * (4 + MAX_DATAGRAM_SIZE) <= MAX_FRAME_BYTES
+);
 const NONE: u16 = u16::MAX;
 const MAX_BINDINGS: usize = (MAX_DEVICE_PEERS + MAX_SERVICE_PEERS) * MAX_INDICES_PER_PEER;
 
@@ -27,12 +30,32 @@ pub(super) struct Request {
     pub operation: Operation,
 }
 pub(super) enum Operation {
-    Receive { peer: Option<u16>, packet: Vec<u8> },
-    Initiate { peer: u16 },
-    Send { peer: u16, packet: Vec<u8> },
-    Tick { peer: u16 },
-    Reset { peer: u16 },
-    SetServicePeers { peers: Vec<PeerConfig> },
+    Receive {
+        peer: Option<u16>,
+        packet: Vec<u8>,
+    },
+    Initiate {
+        peer: u16,
+    },
+    Send {
+        peer: u16,
+        packet: Vec<u8>,
+    },
+    Tick {
+        peer: u16,
+    },
+    Reset {
+        peer: u16,
+    },
+    SetServicePeers {
+        peers: Vec<PeerConfig>,
+    },
+    BroadcastBatch {
+        job: u64,
+        packet: Option<crate::PacketBytes>,
+        targets: Vec<(u16, Option<std::net::Ipv4Addr>)>,
+        last: bool,
+    },
 }
 pub(super) struct Binding {
     pub peer: u16,
@@ -45,6 +68,7 @@ pub(super) struct Reply {
     pub outcome: Result<Option<Output>, WireGuardError>,
 }
 pub(super) enum Output {
+    Broadcast(Vec<(u16, Vec<u8>)>),
     Network { peer: u16, packet: Vec<u8> },
     Plaintext { peer: u16, packet: Vec<u8> },
 }
@@ -217,6 +241,37 @@ pub(super) fn encode_request_scoped(
     external: bool,
     request: &Request,
 ) -> Result<Vec<u8>, ProtocolError> {
+    if let Operation::BroadcastBatch {
+        job,
+        packet,
+        targets,
+        last,
+    } = &request.operation
+    {
+        if external || targets.len() > crate::broadcast::BATCH {
+            return Err(ProtocolError::InvalidFrame);
+        }
+        let len = packet.as_ref().map_or(0, |p| p.as_bytes().len());
+        if len > MAX_PLAINTEXT_SIZE {
+            return Err(ProtocolError::InvalidFrame);
+        }
+        let mut frame = frame_start(25 + len + targets.len() * 6, 3)?;
+        frame.extend_from_slice(&request.sequence.to_le_bytes());
+        frame.push(7);
+        frame.extend_from_slice(&NONE.to_le_bytes());
+        frame.extend_from_slice(&job.to_le_bytes());
+        frame.push(u8::from(*last));
+        frame.extend_from_slice(&(len as u16).to_le_bytes());
+        if let Some(packet) = packet {
+            frame.extend_from_slice(packet.as_bytes());
+        }
+        frame.push(targets.len() as u8);
+        for (peer, rewrite) in targets {
+            frame.extend_from_slice(&required_peer(*peer)?.to_le_bytes());
+            frame.extend_from_slice(&rewrite.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED).octets());
+        }
+        return Ok(frame);
+    }
     if let Operation::SetServicePeers { peers } = &request.operation {
         if peers.len() > MAX_SERVICE_PEERS
             || peers.iter().any(|peer| !matches!(peer.id, PeerId::Node(_)))
@@ -260,7 +315,9 @@ pub(super) fn encode_request_scoped(
         }
         Operation::Tick { peer } => (4, required_peer(*peer)?, None),
         Operation::Reset { peer } => (5, required_peer(*peer)?, None),
-        Operation::SetServicePeers { .. } => unreachable!("handled above"),
+        Operation::SetServicePeers { .. } | Operation::BroadcastBatch { .. } => {
+            unreachable!("handled above")
+        }
     };
     if matches!(
         &request.operation,
@@ -313,6 +370,39 @@ pub(super) fn decode_request_scoped(external: bool, body: &[u8]) -> Result<Reque
         5 => Operation::Reset {
             peer: required_peer(peer)?,
         },
+        7 if peer == NONE && !external => {
+            let job = cursor.u64()?;
+            let last = match cursor.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(ProtocolError::InvalidFrame),
+            };
+            let len = usize::from(cursor.u16()?);
+            if len > MAX_PLAINTEXT_SIZE {
+                return Err(ProtocolError::InvalidFrame);
+            }
+            let packet = if len == 0 {
+                None
+            } else {
+                Some(crate::PacketBytes(cursor.take(len)?.to_vec()))
+            };
+            let count = usize::from(cursor.u8()?);
+            if count > crate::broadcast::BATCH || cursor.remaining() != count * 6 {
+                return Err(ProtocolError::InvalidFrame);
+            }
+            let mut targets = Vec::with_capacity(count);
+            for _ in 0..count {
+                let slot = required_peer(cursor.u16()?)?;
+                let addr = std::net::Ipv4Addr::from(<[u8; 4]>::try_from(cursor.take(4)?).unwrap());
+                targets.push((slot, (!addr.is_unspecified()).then_some(addr)));
+            }
+            Operation::BroadcastBatch {
+                job,
+                packet,
+                targets,
+                last,
+            }
+        }
         6 if peer == NONE => {
             let count = usize::from(cursor.u16()?);
             if count > MAX_SERVICE_PEERS {
@@ -353,6 +443,12 @@ pub(super) fn encode_reply_scoped(external: bool, reply: &Reply) -> Result<Vec<u
     }
     let extra = match &reply.outcome {
         Ok(None) => 0,
+        Ok(Some(Output::Broadcast(outputs))) => {
+            if external || outputs.len() > crate::broadcast::BATCH {
+                return Err(ProtocolError::InvalidFrame);
+            }
+            1 + outputs.iter().map(|(_, p)| 4 + p.len()).sum::<usize>()
+        }
         Err(_) => 1,
         Ok(Some(Output::Network { packet, .. } | Output::Plaintext { packet, .. })) => {
             4 + packet.len()
@@ -368,6 +464,14 @@ pub(super) fn encode_reply_scoped(external: bool, reply: &Reply) -> Result<Vec<u
     }
     match &reply.outcome {
         Ok(None) => frame.push(0),
+        Ok(Some(Output::Broadcast(outputs))) => {
+            frame.push(4);
+            frame.push(outputs.len() as u8);
+            for (peer, packet) in outputs {
+                frame.extend_from_slice(&required_peer(*peer)?.to_le_bytes());
+                put_packet(&mut frame, packet, MAX_DATAGRAM_SIZE)?;
+            }
+        }
         Ok(Some(Output::Network { peer, packet })) => {
             frame.push(1);
             frame.extend_from_slice(&required_peer(*peer)?.to_le_bytes());
@@ -427,6 +531,20 @@ pub(super) fn decode_reply_scoped(external: bool, body: &[u8]) -> Result<Reply, 
                 MAX_PLAINTEXT_SIZE
             })?,
         })),
+        4 if !external => {
+            let count = usize::from(cursor.u8()?);
+            if count > crate::broadcast::BATCH || count * 4 > cursor.remaining() {
+                return Err(ProtocolError::InvalidFrame);
+            }
+            let mut outputs = Vec::with_capacity(count);
+            for _ in 0..count {
+                outputs.push((
+                    required_peer(cursor.u16()?)?,
+                    cursor.packet(MAX_DATAGRAM_SIZE)?,
+                ));
+            }
+            Ok(Some(Output::Broadcast(outputs)))
+        }
         3 => Err(decode_error(cursor.u8()?)?),
         _ => return Err(ProtocolError::InvalidFrame),
     };

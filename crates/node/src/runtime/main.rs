@@ -268,7 +268,7 @@ impl MainForwarder {
             return Ok(events);
         }
         for _ in 0..BATCH {
-            match self.active.gateway.poll() {
+            match self.active.gateway.poll_ordinary() {
                 Some(LocalEvent::ProviderOutput(datagram)) => {
                     self.egress.send(&mut self.active.gateway, datagram)
                 }
@@ -313,6 +313,9 @@ impl MainForwarder {
                     generation,
                     ..
                 }) => {
+                    if context == ContextId::Gateway {
+                        self.mesh.clear_broadcast_assemblies();
+                    }
                     self.egress.failed(&context);
                     if context == ContextId::Service {
                         self.control_timer.failed = true;
@@ -404,6 +407,8 @@ impl MainForwarder {
                 self.buffer.as_mut(),
                 &mut self.incoming,
             )?;
+        } else {
+            self.active.gateway.advance_broadcast();
         }
         for _ in 0..BATCH {
             let Some((peer, bytes, deadline)) = self.outgoing.front() else {
@@ -459,8 +464,22 @@ impl MainForwarder {
                 self.buffer.as_mut(),
                 &mut self.incoming,
             )?;
+        } else {
+            self.active.gateway.advance_broadcast();
         }
         Ok(events)
+    }
+    pub fn wait_for_broadcast(&self, maximum: Duration) -> Result<bool, &'static str> {
+        if !self.active.gateway.has_broadcast_jobs() {
+            return Ok(false);
+        }
+        if !self.active.gateway.has_pending_broadcast() {
+            self.active
+                .gateway
+                .wait_for_activity(&[], maximum)
+                .map_err(|_| "cannot wait for main forwarding worker")?;
+        }
+        Ok(true)
     }
 }
 fn candidate_ready(candidate: &mut Candidate) -> Result<bool, &'static str> {
