@@ -60,8 +60,8 @@ Disconnected Nodes retain their last accepted policy. New revocations and policy
 changes take effect when delivered and applied; inspect
 `wgfeel config distribution` for acknowledgement status.
 
-The supported server target is Linux x86-64. Real multi-host acceptance and the
-published capacity target remain outstanding; see [Backlog](BACKLOG.md).
+The supported server target is Linux x86-64. Real multi-host deployment remains
+unverified. The [backlog](BACKLOG.md) tracks reproducible load testing.
 No long-term support/backport policy or security response SLA is currently defined.
 
 ## Reporting a vulnerability

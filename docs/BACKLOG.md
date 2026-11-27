@@ -1,21 +1,38 @@
 # Backlog
 
-Planned work and outstanding acceptance checks.
+- [ ] **User and device activity.** Show bytes sent and received per device and
+  totals per user in the administrative menus. Show when each device was last
+  seen. Use a documented time window for recent authenticated WireGuard traffic
+  or handshakes, and mark a user as recently active if any of their devices
+  qualifies. Show unknown status when observations are unavailable.
+- [ ] **Reproducible integration and load tests.** Provide a Docker Compose
+  setup with main, child nodes and WireGuard clients in separate containers.
+  Generate traffic concurrently for several users, verify delivery between each
+  user's devices and check isolation between users. Include a repeatable load
+  run with 150 networks and 750 configured devices on an entry limited to 1 GiB.
+  Document how to run it, how many devices send traffic, and how to compare
+  packet delivery, CPU usage and peak memory across runs.
+- [ ] **Release builds.** Build the Linux x86-64 `wgfeel` executable for each
+  version tag and publish it in a GitHub Release with a checksum and release notes.
+- [ ] **External WireGuard gateways per user.** Assign an external WireGuard
+  profile to a designated wgfeel node and grant one or more users access to it.
+  Their entry nodes forward matching traffic through the mesh to that node,
+  which holds the tunnel key and connects to the independently operated gateway.
+  Users apply any updated routes in their own client profiles.
 
-- [ ] User/device traffic statistics in menus: bytes, handshakes and activity.
-- [ ] Carry authenticated control traffic through intermediate children; current
-  configuration delivery uses direct main-to-child service sessions. See
-  [Architecture](ARCHITECTURE.md#configuration-and-failure-behavior).
-- [ ] Change an enrolled node's traffic capability through the administrative API/CLI.
-- [ ] CLI changes to installed WG ports, including listeners, service
-  settings, installation receipts, endpoint distribution and regenerated client
-  configurations requiring reimport.
-- [ ] Installation, reboot and removal acceptance on three real hosts with native clients.
-- [ ] Load acceptance for 150 networks / 750 devices on 1 GiB RAM.
-- [ ] Corporate WireGuard/proxy connectors assigned to an owner Node and user network.
-- [ ] API for editing access policies.
-- [ ] Quotas and persistent activity statistics.
-- [ ] Automated release builds of the common `wgfeel` executable for supported targets.
-- [ ] Publish versioned GitHub Releases with binaries, checksums and release notes.
+  - **Internet exit.** Route the assigned users' internet traffic through the
+    external gateway, for example using a compatible WARP or Proton VPN profile.
+  - **Selected destinations.** Route traffic for a host such as `admin.website`
+    or a corporate subnet through a standard WireGuard server. Other traffic
+    follows its usual route.
+
+  If a mesh partition cuts off the designated node, the exit is unavailable
+  on that side until a route returns. Any future automatic takeover requires
+  both an outage and exclusive use of the external profile by the new node.
+
+  Test both modes in Compose with a separate WireGuard server. Verify which
+  traffic exits there, that unassigned users cannot use it through wgfeel, and
+  that users sharing it cannot reach each other's devices. Revoking one user's
+  assignment must preserve access for the others.
 
 [README](../README.md) · [Contributing](CONTRIBUTING.md)

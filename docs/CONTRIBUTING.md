@@ -292,8 +292,7 @@ selected for publication and their contents before committing. Repository-state
 management and the commit itself belong to the maintainer.
 
 Keep `Cargo.lock` and generated documentation in the commit. Run the checks above
-and the release build before publication. Record real-host acceptance separately in
-[Backlog](BACKLOG.md); a green CI run is not evidence of that deployment test.
+and the release build before publication.
 
 ## Verification scope
 

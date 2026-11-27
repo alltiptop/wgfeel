@@ -78,6 +78,12 @@ Explicit cross-network grants remain local to one entry; cross-network mesh
 forwarding is rejected. Same-user mesh traffic follows the same policy at each
 hop, including suspension and explicit denies.
 
+For user traffic, each node prefers a live direct link to the destination entry.
+If that link fails, it searches the advertised topology for a shortest path
+through nodes assigned to the user's network. During a partition, nodes keep
+probing their peers. Forwarding resumes when they discover a permitted path
+between the entries, even while main is offline.
+
 A relay decreases the hop limit of every forwarded data frame and topology
 announcement. The initial limit is the number of nodes in the mesh. A node
 accepts increasing announcement sequences from the same boot. When an origin
@@ -103,9 +109,7 @@ not reset an active configuration TCP stream. Abandoned distribution requests
 release their slot after five seconds without progress; progressing requests
 retain the separate overall request deadline.
 
-Delivery through intermediate children remains planned: end-to-end
-authentication must still identify main and the intended recipient, without
-granting a forwarding child authority. User traffic remains separated by tenant
+Children do not forward configuration to other children. User traffic remains separated by tenant
 context and policy. There are no automatic main elections or queued
 administrative writes in the MVP.
 
@@ -140,7 +144,8 @@ The layout is `/opt/wgfeel/instance`, with one `wgfeel.service` and command alia
 policy with `wgfeel node add --traffic entry|relay|off`, which prints the advertised main endpoints, the assigned child UDP port and
 a one-time `wgfeel join` command. An installed unbound child has no running
 service. The join process receives the configuration over WireGuard and activates
-the installed service after the binding has been committed. Changing an enrolled child's mode remains planned.
+the installed service after the binding has been committed. An enrolled child's
+traffic mode is fixed.
 
 `wgfeel init` and `wgfeel serve` use the same explicit `--control main|child`
 selection. Update, uninstall, manuals and completion operate on that one instance.
@@ -159,8 +164,7 @@ traffic, isolation, authority transfer and failure recovery, and live/offline
 HTTP port changes. Generated documentation, completion, formatting, Clippy and
 the common release build are checked separately; see [Contributing](CONTRIBUTING.md).
 These checks do not establish real-host systemd, reboot or load acceptance.
-Outstanding deployment acceptance and multi-hop control delivery are tracked in
-[Backlog](BACKLOG.md).
+The [backlog](BACKLOG.md) tracks the planned Docker Compose integration and load tests.
 
 ## Lessons from other implementations
 

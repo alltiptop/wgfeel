@@ -3,7 +3,6 @@
 This guide installs one main and two child entries, then connects two devices
 belonging to one user. An entry main alone is enough to try device networking;
 children exercise the mesh.
-Real-host acceptance is still tracked in [Backlog](BACKLOG.md).
 
 ```text
 Phone ⇄ WireGuard ⇄ Node A ⇄ encrypted mesh ⇄ Node B ⇄ WireGuard ⇄ Laptop
