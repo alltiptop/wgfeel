@@ -244,3 +244,46 @@ fn consumed_plaintext_allocation_is_retained_and_erased_after_success_and_no_ses
     );
     assert!(returned.iter().all(|byte| *byte == 0));
 }
+
+#[test]
+fn mesh_handshake_identity_is_bound_to_the_expected_peer_before_session_changes() {
+    let (mut receiver, context, first, second) = fixture();
+    let ContextId::Tenant(network) = &context else {
+        unreachable!()
+    };
+    let mut sender = Gateway::new(
+        vec![ContextConfig::tenant(
+            network.clone(),
+            TenantPrivateKey::new(seed(2)).unwrap(),
+            vec![PeerConfig {
+                id: first.clone(),
+                public_key: receiver.public_key(&context).unwrap().clone(),
+            }],
+        )],
+        Limits::default(),
+    )
+    .unwrap();
+    let Event::Network { packet, .. } = sender.initiate(&context, &first).unwrap().unwrap() else {
+        panic!("expected initiation")
+    };
+    let source = "127.0.0.1:51820".parse().unwrap();
+    let admission = receiver
+        .router
+        .as_mut()
+        .unwrap()
+        .admit(source, packet.as_bytes())
+        .unwrap();
+    let Verification::Packet(verified) = admission.verified else {
+        panic!("expected admitted handshake")
+    };
+    assert!(receiver.live_indices().unwrap().is_empty());
+    assert!(matches!(
+        receiver.admitted_peer(0, Some(&second), &verified),
+        Err(WireGuardError::UnknownPeer)
+    ));
+    assert!(receiver.live_indices().unwrap().is_empty());
+    assert_eq!(
+        receiver.admitted_peer(0, Some(&first), &verified).unwrap(),
+        0
+    );
+}

@@ -242,7 +242,7 @@ fn common_installations_discover_their_state_join_and_change_only_the_http_port(
     let text = String::from_utf8(issued.stdout).unwrap();
     let invitation = text
         .lines()
-        .find_map(|line| line.strip_prefix("wgfeel join '")?.strip_suffix('\''))
+        .find(|line| line.starts_with("wgfeel://join/"))
         .unwrap();
     assert!(text.contains(&format!("Main main (WireGuard UDP): {main_endpoint}")));
     assert!(text.contains(&format!(
@@ -257,9 +257,12 @@ fn common_installations_discover_their_state_join_and_change_only_the_http_port(
     assert_eq!(fs::read(child_state.join("state.json")).unwrap(), unbound);
     assert!(!child_state.join("api.sock").exists());
     drop(occupied);
-    let joined = spawn(child_binary.clone(), vec!["join".into(), invitation.into()])
-        .wait(Duration::from_secs(80))
-        .unwrap();
+    let mut join = spawn(
+        child_binary.clone(),
+        vec!["join".into(), "--invitation-stdin".into()],
+    );
+    join.write_stdin_line(invitation.as_bytes()).unwrap();
+    let joined = join.wait(Duration::from_secs(80)).unwrap();
     success(&joined);
     assert!(!child_state.join("api.sock").exists());
     // --no-start leaves the unit stopped. Starting its installed command must
@@ -511,7 +514,7 @@ fn separately_installed_node_joins_and_receives_updates_over_ipv4_and_ipv6() {
         let output = String::from_utf8(invitation.stdout).unwrap();
         let uri = output
             .lines()
-            .find_map(|line| line.strip_prefix("wgfeel join '")?.strip_suffix('\''))
+            .find(|line| line.starts_with("wgfeel://join/"))
             .expect("one-time join command");
         let joined = spawn(
             child_root.0.join("usr/local/bin/wgfeel"),
@@ -647,7 +650,26 @@ fn install_and_update_replace_existing_binary_without_changing_configuration() {
                 "192.0.2.1"
             },
         ];
-        success(&root.call(&setup));
+        let mut install: Vec<OsString> = vec![
+            "-c".into(),
+            r#"umask 077; exec "$@""#.into(),
+            "install-test".into(),
+            env!("CARGO_BIN_EXE_wgfeel").into(),
+            "install".into(),
+            "--root".into(),
+            root.0.clone().into(),
+            "--no-start".into(),
+        ];
+        install.extend(setup.iter().map(OsString::from));
+        success(&run("/bin/sh".into(), install));
+        assert_eq!(
+            fs::metadata(root.0.join("usr/local/bin/wgfeel"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
         let mut files = vec![
             "opt/wgfeel/instance/state/state.json",
             "opt/wgfeel/instance/config/admin.json",

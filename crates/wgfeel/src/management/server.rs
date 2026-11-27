@@ -27,6 +27,67 @@ const MAX_CONNECTIONS: usize = 16;
 const REQUEST_CAPACITY: usize = http::MAX_HEADER_BYTES + wgfeel_management::MAX_REQUEST_BODY;
 const DEADLINE: Duration = Duration::from_secs(5);
 
+/// A shortage in one listener must not stall the shared forwarding loop.
+#[derive(Default)]
+pub(super) struct AcceptLoop {
+    retry_at: Option<Instant>,
+    backed_off: bool,
+}
+
+impl AcceptLoop {
+    pub(super) fn poll<S, A>(
+        &mut self,
+        mut accept: impl FnMut() -> io::Result<(S, A)>,
+        mut connected: impl FnMut(S),
+        mut on_backoff: impl FnMut(Errno),
+    ) -> io::Result<()> {
+        if self.retry_at.is_some_and(|due| Instant::now() < due) {
+            return Ok(());
+        }
+        self.retry_at = None;
+        for _ in 0..MAX_CONNECTIONS {
+            match accept() {
+                Ok((stream, _)) => {
+                    self.backed_off = false;
+                    connected(stream);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.backed_off = false;
+                    break;
+                }
+                Err(error) => match error.raw_os_error().map(Errno::from_raw) {
+                    Some(
+                        errno @ (Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS | Errno::ENOMEM),
+                    ) => {
+                        self.retry_at = Some(Instant::now() + Duration::from_millis(100));
+                        if !self.backed_off {
+                            self.backed_off = true;
+                            on_backoff(errno);
+                        }
+                        break;
+                    }
+                    Some(
+                        Errno::EINTR
+                        | Errno::ECONNABORTED
+                        | Errno::ECONNRESET
+                        | Errno::ENETDOWN
+                        | Errno::EPROTO
+                        | Errno::ENOPROTOOPT
+                        | Errno::EHOSTDOWN
+                        | Errno::ENONET
+                        | Errno::EHOSTUNREACH
+                        | Errno::EOPNOTSUPP
+                        | Errno::EPERM
+                        | Errno::ENETUNREACH,
+                    ) => continue,
+                    _ => return Err(error),
+                },
+            }
+        }
+        Ok(())
+    }
+}
+
 struct Logger {
     sender: SyncSender<(bool, String)>,
     thread: thread::JoinHandle<()>,
@@ -280,6 +341,7 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
         .map_err(|_| "cannot read Management identity")?;
     let ready = serde_json::json!({"event":"ready", "control":"main", "management_id":management_id.as_str(), "generation":generation});
     let mut announced = false;
+    let mut accept = AcceptLoop::default();
     let mut connections: Vec<Connection> = Vec::with_capacity(MAX_CONNECTIONS);
     loop {
         match signals.read_signal() {
@@ -287,19 +349,24 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
             Ok(None) | Err(Errno::EINTR) => (),
             Err(_) => return Err("cannot read Management shutdown signal"),
         }
-        for _ in 0..MAX_CONNECTIONS {
-            match listener.accept() {
-                Ok((stream, _)) if connections.len() < MAX_CONNECTIONS => {
-                    if let Ok(connection) = Connection::new(stream) {
+        accept
+            .poll(
+                || listener.accept(),
+                |stream| {
+                    if connections.len() < MAX_CONNECTIONS
+                        && let Ok(connection) = Connection::new(stream)
+                    {
                         connections.push(connection);
                     }
-                }
-                Ok(_) => (),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err("cannot accept Management request"),
-            }
-        }
+                },
+                |_| {
+                    logger.emit(
+                        true,
+                        "Management local listener backing off after temporary accept error".into(),
+                    );
+                },
+            )
+            .map_err(|_| "cannot accept Management request")?;
         connections.retain_mut(|connection| {
             connection.progress(|request| {
                 if request.target == super::rest::LOCAL_PATH {
@@ -309,7 +376,7 @@ fn serve(args: &[OsString], signals: &SignalFd, logger: &Logger) -> Result<(), &
                 }
             })
         });
-        rest.poll(&mut service)?;
+        rest.poll(&mut service, |message| logger.emit(true, message))?;
         if let Some((tunnel, tcp)) = &mut system {
             distributor.poll(&mut service, tunnel);
             enrollment.poll(&mut service, tunnel, |message| logger.emit(true, message));
@@ -397,7 +464,7 @@ struct InvitationSession<'a> {
     tcp: tcp::Server<'a>,
 }
 
-// One remote administrative identity; bound expensive Argon2 work before dispatch.
+// Bound each remote administrative transport before loading or changing state.
 pub(super) struct ApiBudget {
     tokens: u32,
     refill: Instant,
@@ -425,6 +492,75 @@ impl ApiBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accept_recovers_per_connection_and_resource_backoff_is_local() {
+        let mut first = AcceptLoop::default();
+        let mut second = AcceptLoop::default();
+        let mut events = [
+            Err(Errno::ECONNABORTED),
+            Err(Errno::EPERM),
+            Err(Errno::EOPNOTSUPP),
+            Ok((1, ())),
+            Err(Errno::EMFILE),
+        ]
+        .into_iter();
+        let mut accepted = vec![];
+        let mut backoffs = vec![];
+        first
+            .poll(
+                || events.next().unwrap().map_err(io::Error::from),
+                |stream| accepted.push(stream),
+                |errno| backoffs.push(errno),
+            )
+            .unwrap();
+        assert_eq!(accepted, [1]);
+        assert_eq!(backoffs, [Errno::EMFILE]);
+        first
+            .poll::<(), ()>(
+                || panic!("listener is backing off"),
+                |_| unreachable!(),
+                |_| unreachable!(),
+            )
+            .unwrap();
+        let mut healthy = [Ok((2, ())), Err(io::ErrorKind::WouldBlock.into())].into_iter();
+        second
+            .poll(
+                || healthy.next().unwrap(),
+                |stream| accepted.push(stream),
+                |_| unreachable!(),
+            )
+            .unwrap();
+        first.retry_at = Some(Instant::now());
+        // Repeated backoff before any recovery does not spam diagnostics.
+        first
+            .poll::<(), ()>(
+                || Err(Errno::ENOBUFS.into()),
+                |_| unreachable!(),
+                |errno| backoffs.push(errno),
+            )
+            .unwrap();
+        assert_eq!(backoffs, [Errno::EMFILE]);
+        first.retry_at = Some(Instant::now());
+        let mut recovered = [Ok((3, ())), Err(io::ErrorKind::WouldBlock.into())].into_iter();
+        first
+            .poll(
+                || recovered.next().unwrap(),
+                |stream| accepted.push(stream),
+                |_| unreachable!(),
+            )
+            .unwrap();
+        assert_eq!(accepted, [1, 2, 3]);
+        assert!(
+            first
+                .poll::<(), ()>(
+                    || Err(Errno::EBADF.into()),
+                    |_| unreachable!(),
+                    |_| unreachable!(),
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn remote_api_budget_bounds_bursts_and_refills_without_unbounded_credit() {
         let now = Instant::now();

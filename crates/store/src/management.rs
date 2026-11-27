@@ -376,7 +376,7 @@ impl ManagementStore {
     fn decode(bytes: &[u8]) -> Result<StoredManagement, StoreError> {
         let stored: ReadManagement<'_> =
             serde_json::from_slice(bytes).map_err(|_| StoreError::InvalidState)?;
-        if stored.management_storage_version != 5 || !stored.admin_verifier.valid() {
+        if stored.management_storage_version != 6 {
             return Err(StoreError::InvalidState);
         }
         let managed = stored.secrets.is_some();
@@ -672,7 +672,7 @@ impl ManagementStore {
             RawValue::from_string(document.to_json().map_err(StoreError::InvalidConfig)?)
                 .map_err(|_| StoreError::InvalidState)?;
         let envelope = WriteManagement {
-            management_storage_version: 5,
+            management_storage_version: 6,
             document: &document,
             service_private_key: key.service().expose_bytes(),
             gateway_private_key: key.gateway().expose_bytes(),

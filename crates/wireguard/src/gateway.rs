@@ -481,7 +481,7 @@ impl Gateway {
     ) -> Result<usize, WireGuardError> {
         let context = &self.contexts[slot];
         match (packet, peer) {
-            (WgKind::HandshakeInit(init), None) => {
+            (WgKind::HandshakeInit(init), expected) => {
                 // This partial parse only selects a configured peer. Tunn must
                 // authenticate it before metadata or plaintext is trusted.
                 let half = parse_handshake_anon(
@@ -495,10 +495,10 @@ impl Gateway {
                     .iter()
                     .position(|candidate| {
                         candidate.public_key.as_bytes() == &half.peer_static_public
+                            && expected.is_none_or(|id| id == &candidate.id)
                     })
                     .ok_or(WireGuardError::UnknownPeer)
             }
-            (WgKind::HandshakeInit(_), Some(_)) => Err(WireGuardError::Protocol),
             (_, Some(peer)) => context
                 .peers
                 .iter()

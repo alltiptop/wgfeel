@@ -54,6 +54,7 @@ struct Candidate {
     deadline: Instant,
 }
 fn spawn(
+    previous: Option<&LocalGateway>,
     projection: &GatewayProjection,
     key: &NodeKeys,
     tenants: &LocalTenants,
@@ -61,20 +62,25 @@ fn spawn(
     if projection.control_mode() != ControlMode::Main {
         return Err("main forwarding requires its own authoritative projection");
     }
-    let gateway = LocalGateway::spawn_managed(
-        projection,
-        projection.assignment().service_public_key(),
-        key,
-        tenants
-            .network_ids()
-            .filter_map(|id| tenants.private_key(id).map(|key| (id, key))),
-        Limits::default(),
-        control::options(),
-    )
+    let assigned = tenants
+        .network_ids()
+        .filter_map(|id| tenants.private_key(id).map(|key| (id, key)));
+    let pin = projection.assignment().service_public_key();
+    let gateway = match previous {
+        Some(previous) => previous.prepare_replacement(projection, pin, key, assigned),
+        None => LocalGateway::spawn_managed(
+            projection,
+            pin,
+            key,
+            assigned,
+            Limits::default(),
+            control::options(),
+        ),
+    }
     .map_err(|_| "cannot construct main forwarding workers")?;
     Ok(Candidate {
+        remaining: gateway.starting_workers(),
         gateway,
-        remaining: projection.assignment().tenants().len() + 2,
         deadline: Instant::now() + Duration::from_secs(10),
     })
 }
@@ -90,7 +96,7 @@ pub struct MainForwarder {
     dns: dns::Runtime,
     timers: Vec<Timer>,
     controls: Vec<PeerConfig>,
-    applied_controls: Vec<PeerConfig>,
+    applied_controls: Option<Vec<PeerConfig>>,
     pending_controls: Option<Vec<PeerConfig>>,
     control_timer: Timer,
     service_peers: Vec<ServicePeer>,
@@ -108,17 +114,17 @@ impl MainForwarder {
         tenants: &LocalTenants,
     ) -> Result<Self, &'static str> {
         let socket = UdpListener::bind(listen).map_err(|_| "cannot bind main WireGuard socket")?;
-        let active = spawn(projection, key, tenants)?;
+        let active = spawn(None, projection, key, tenants)?;
         let service_peers = service_peers(projection, &socket);
         Ok(Self {
             socket,
             mesh: mesh::Runtime::new(projection)?,
-            dns: dns::Runtime::new()?,
+            dns: dns::Runtime::default(),
             timers: timers(&active.gateway, true),
             active,
             pending: None,
             controls: vec![],
-            applied_controls: vec![],
+            applied_controls: Some(vec![]),
             pending_controls: None,
             control_timer: control_timer(&[]),
             service_peers,
@@ -132,7 +138,7 @@ impl MainForwarder {
     pub fn ready(&self) -> bool {
         self.active.remaining == 0
             && self.pending_controls.is_none()
-            && self.controls == self.applied_controls
+            && self.applied_controls.as_ref() == Some(&self.controls)
             && !self.control_timer.failed
             && self.timers.iter().all(|timer| !timer.failed)
     }
@@ -170,7 +176,7 @@ impl MainForwarder {
             // Prepare all fallible routing state before publishing the revision.
             // A policy-only update keeps crypto sessions, but not old mesh ACLs,
             // fragment assemblies, queued output or outstanding DNS decisions.
-            let mesh = mesh::Runtime::new(projection)?;
+            let mesh = self.mesh.replacement(projection)?;
             self.active
                 .gateway
                 .replace_projection(projection)
@@ -179,7 +185,7 @@ impl MainForwarder {
             self.dns.reset();
             return Ok(());
         }
-        self.pending = Some(spawn(projection, key, tenants)?);
+        self.pending = Some(spawn(Some(&self.active.gateway), projection, key, tenants)?);
         Ok(())
     }
     pub fn control_peers(&mut self, peers: Vec<PeerConfig>) {
@@ -242,11 +248,12 @@ impl MainForwarder {
                 }
                 Some(LocalEvent::ControlConfigured { result }) => {
                     result.map_err(|_| "cannot configure main API peers")?;
-                    self.applied_controls = self
+                    let applied = self
                         .pending_controls
                         .take()
                         .ok_or("unexpected main peer update")?;
-                    self.control_timer = control_timer(&self.applied_controls);
+                    self.control_timer = control_timer(&applied);
+                    self.applied_controls = Some(applied);
                 }
                 Some(LocalEvent::Failed {
                     context,
@@ -282,7 +289,7 @@ impl MainForwarder {
         if let Some(pending) = &mut self.pending {
             match candidate_ready(pending) {
                 Ok(true) if self.pending_controls.is_none() => {
-                    let mesh = mesh::Runtime::new(pending.gateway.projection())?;
+                    let mesh = self.mesh.replacement(pending.gateway.projection())?;
                     // A failed worker has no session to inherit. A newly
                     // committed revision may activate its prepared replacement;
                     // mere worker failure never triggers an automatic restart.
@@ -290,22 +297,20 @@ impl MainForwarder {
                         worker.context == ContextId::Service
                             && worker.state == wgfeel_wireguard::worker::WorkerState::Failed
                     });
-                    let inherited = if failed {
-                        Ok(())
-                    } else {
-                        pending
-                            .gateway
-                            .inherit_main_service(&mut self.active.gateway)
-                    };
-                    match inherited {
+                    let activated = pending
+                        .gateway
+                        .handoff(&mut self.active.gateway)
+                        .and_then(|handoff| handoff.activate());
+                    match activated {
                         Ok(()) => {
-                            self.active = self.pending.take().expect("ready candidate");
+                            self.pending = None;
+                            self.active.remaining = 0;
                             self.mesh = mesh;
                             self.dns.reset();
                             self.timers = timers(&self.active.gateway, true);
                             self.service_peers =
                                 service_peers(self.active.gateway.projection(), &self.socket);
-                            self.applied_controls.clear();
+                            self.applied_controls = None;
                             if failed {
                                 self.control_timer = control_timer(&[]);
                             }
@@ -313,7 +318,7 @@ impl MainForwarder {
                                 generation: self.generation(),
                             });
                         }
-                        Err(LocalError::Worker(WorkerError::Busy | WorkerError::NotReady)) => (),
+                        Err(LocalError::Worker(WorkerError::Busy)) => (),
                         Err(_) => {
                             self.pending = None;
                             events.push(MainEvent::ConfigurationRejected);
@@ -327,7 +332,8 @@ impl MainForwarder {
                 }
             }
         }
-        if self.pending_controls.is_none() && self.controls != self.applied_controls {
+        if self.pending_controls.is_none() && self.applied_controls.as_ref() != Some(&self.controls)
+        {
             match self.active.gateway.set_control_peers(self.controls.clone()) {
                 Ok(()) => self.pending_controls = Some(self.controls.clone()),
                 Err(LocalError::Worker(WorkerError::Busy | WorkerError::NotReady)) => (),

@@ -258,6 +258,14 @@ impl Stack {
             .poll_egress(time, &mut self.packets, &mut self.sockets);
         requests
     }
+    pub fn discard(&mut self, target: Target) {
+        if let Target::Tcp { slot, session } = target {
+            let stream = &self.streams[slot];
+            if stream.session == session && stream.waiting {
+                self.sockets.get_mut::<tcp::Socket>(stream.handle).abort();
+            }
+        }
+    }
     pub fn reply(&mut self, target: Target, bytes: &[u8]) {
         match target {
             Target::Udp { remote, local } => {
@@ -282,5 +290,30 @@ impl Stack {
                 stream.output.extend_from_slice(bytes);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn discarded_tcp_request_releases_its_own_session_on_the_next_poll() {
+        let mut stack = Stack::new(42);
+        stack.poll(Duration::ZERO);
+        let stream = &mut stack.streams[0];
+        stream.waiting = true;
+        let session = stream.session;
+        let handle = stream.handle;
+        stack.discard(Target::Tcp {
+            slot: 0,
+            session: session.wrapping_sub(1),
+        });
+        assert!(stack.sockets.get::<tcp::Socket>(handle).is_open());
+        stack.discard(Target::Tcp { slot: 0, session });
+        assert!(!stack.sockets.get::<tcp::Socket>(handle).is_open());
+        stack.poll(Duration::from_millis(1));
+        assert!(stack.sockets.get::<tcp::Socket>(handle).is_listening());
+        assert!(!stack.streams[0].waiting);
+        assert_ne!(stack.streams[0].session, session);
     }
 }

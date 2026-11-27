@@ -38,7 +38,7 @@ cargo build --release --locked -p wgfeel --bin wgfeel
 # Main: choose the child's traffic mode and issue a one-time invitation
 wgfeel node add --traffic entry
 # Child: run the printed command
-wgfeel join 'wgfeel://join/…'
+wgfeel join --invitation-stdin
 ```
 
 Each instance uses one WireGuard UDP listener and `wgfeel.service`; its state is

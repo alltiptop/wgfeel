@@ -1,7 +1,6 @@
 //! External REST is a separate TCP listener, never a node control RPC endpoint.
-use super::server::{ApiBudget, Connection};
+use super::server::{AcceptLoop, ApiBudget, Connection};
 use std::{
-    io,
     net::{SocketAddr, TcpListener, TcpStream},
     time::Instant,
 };
@@ -14,6 +13,7 @@ const MAX_CONNECTIONS: usize = 16;
 pub(super) struct Listener {
     listener: Option<TcpListener>,
     connections: Vec<Connection<TcpStream>>,
+    accept: AcceptLoop,
     budget: ApiBudget,
 }
 pub(super) fn bind(settings: &RestApi) -> Result<TcpListener, &'static str> {
@@ -31,24 +31,34 @@ impl Listener {
         Ok(Self {
             listener: state.rest_api().map(bind).transpose()?,
             connections: Vec::with_capacity(MAX_CONNECTIONS),
+            accept: AcceptLoop::default(),
             budget: ApiBudget::new(Instant::now()),
         })
     }
-    pub(super) fn poll(&mut self, service: &mut ManagementService) -> Result<(), &'static str> {
+    pub(super) fn poll(
+        &mut self,
+        service: &mut ManagementService,
+        mut log: impl FnMut(String),
+    ) -> Result<(), &'static str> {
         if let Some(listener) = &self.listener {
-            for _ in 0..MAX_CONNECTIONS {
-                match listener.accept() {
-                    Ok((stream, _)) if self.connections.len() < MAX_CONNECTIONS => {
-                        if let Ok(connection) = Connection::remote(stream) {
+            self.accept
+                .poll(
+                    || listener.accept(),
+                    |stream| {
+                        if self.connections.len() < MAX_CONNECTIONS
+                            && let Ok(connection) = Connection::remote(stream)
+                        {
                             self.connections.push(connection);
                         }
-                    }
-                    Ok(_) => (),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => return Err("cannot accept HTTP API connection"),
-                }
-            }
+                    },
+                    |_| {
+                        log(
+                            "Management HTTP API listener backing off after temporary accept error"
+                                .into(),
+                        );
+                    },
+                )
+                .map_err(|_| "cannot accept HTTP API connection")?;
         }
         self.connections.retain_mut(|connection| {
             connection.progress(|request| {

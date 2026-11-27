@@ -185,7 +185,7 @@ fn opening_authority_keeps_its_document_identity_and_hashed_credential() {
     assert_eq!(document(&mut service), initial());
     assert_eq!(fixture.bytes(), before);
     let state: serde_json::Value = serde_json::from_slice(&before).unwrap();
-    assert_eq!(state["admin_verifier"]["algorithm"], "argon2id");
+    assert_eq!(state["admin_verifier"]["algorithm"], "hmac-sha256");
     assert!(state.get("admin_credential").is_none());
 }
 fn metadata(name: &str) -> DeviceMetadata {
@@ -1134,4 +1134,37 @@ fn each_request_reloads_committed_revision_and_credential_instead_of_cached_auth
         br#"{"name":"dave"}"#,
     );
     error(&stale, 412);
+}
+
+#[test]
+fn malformed_authorization_and_oversized_bodies_are_rejected_before_loading_state() {
+    let fixture = Fixture::new();
+    let mut service = fixture.service();
+    fs::write(fixture.path().join("state.json"), b"invalid snapshot").unwrap();
+    let valid_format = bearer(109);
+    let request = |authorization| Request {
+        method: "GET",
+        target: "/api/v1/users",
+        authorization,
+        if_match: None,
+        body: b"",
+    };
+    assert_eq!(service.handle(request(None)).status, 401);
+    assert_eq!(
+        service
+            .handle_local(request(Some("Bearer malformed")))
+            .status,
+        401
+    );
+    let body = vec![0; wgfeel_management::MAX_REQUEST_BODY + 1];
+    assert_eq!(
+        service
+            .handle(Request {
+                body: &body,
+                ..request(Some(&valid_format))
+            })
+            .status,
+        413
+    );
+    assert_eq!(service.handle(request(Some(&valid_format))).status, 503);
 }

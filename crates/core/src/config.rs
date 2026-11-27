@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
 pub const DNS_ZONE: &str = "feel.internal";
@@ -13,12 +13,6 @@ pub const DNS_IPV4: Ipv4Addr = Ipv4Addr::new(10, 203, 0, 1);
 pub const DNS_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, 1);
 pub fn is_dns_address(address: IpAddr) -> bool {
     address == IpAddr::V4(DNS_IPV4) || address == IpAddr::V6(DNS_IPV6)
-}
-pub(crate) fn default_dns_upstreams() -> Vec<SocketAddr> {
-    vec![
-        SocketAddr::from(([1, 1, 1, 1], 53)),
-        SocketAddr::from(([9, 9, 9, 9], 53)),
-    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,7 +103,6 @@ pub struct Network {
     private_lan: bool,
     #[serde(skip_serializing_if = "is_false")]
     suspended: bool,
-    dns_upstreams: Vec<SocketAddr>,
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -145,7 +138,6 @@ impl Network {
             devices,
             private_lan: false,
             suspended: false,
-            dns_upstreams: default_dns_upstreams(),
         })
     }
     pub fn with_private_lan(mut self, enabled: bool) -> Self {
@@ -162,29 +154,10 @@ impl Network {
     pub fn suspended(&self) -> bool {
         self.suspended
     }
-    /// Empty disables external lookup; private names are still served locally.
-    pub fn with_dns_upstreams(mut self, upstreams: Vec<SocketAddr>) -> Result<Self, DomainError> {
-        if upstreams.len() > 3
-            || upstreams.iter().any(|server| {
-                server.port() == 0
-                    || is_dns_address(server.ip())
-                    || server.ip().is_unspecified()
-                    || server.ip().is_multicast()
-            })
-        {
-            return Err(DomainError::InvalidDnsUpstream);
-        }
-        self.dns_upstreams = upstreams;
-        Ok(self)
-    }
-    pub fn dns_upstreams(&self) -> &[SocketAddr] {
-        &self.dns_upstreams
-    }
     pub fn with_devices(&self, devices: Vec<Device>) -> Result<Self, DomainError> {
-        Self::new(self.id.clone(), devices)?
+        Ok(Self::new(self.id.clone(), devices)?
             .with_private_lan(self.private_lan)
-            .with_suspended(self.suspended)
-            .with_dns_upstreams(self.dns_upstreams.clone())
+            .with_suspended(self.suspended))
     }
     pub fn id(&self) -> &NetworkId {
         &self.id

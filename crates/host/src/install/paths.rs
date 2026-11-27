@@ -179,6 +179,8 @@ impl Directory {
         }
         let mut target = self.new_file(name, true)?;
         std::io::copy(source, &mut target).map_err(|_| "cannot copy executable")?;
+        fs::fchmod(&target, Mode::from_raw_mode(0o755))
+            .map_err(|_| "cannot set installed executable permissions")?;
         target.sync_all().map_err(|_| "cannot sync executable")?;
         fs::fsync(&self.0).map_err(|_| "cannot sync binary directory".into())
     }

@@ -15,6 +15,10 @@ Security-sensitive changes must preserve these properties:
   integrations use a separate TCP listener and require a bearer token, including
   on loopback. Use a TLS reverse proxy for remote HTTP access; the default bind
   is loopback. Local administration uses an owner-only, OS-authenticated Unix socket.
+- Main generates 32 random bytes for each administrative bearer token at
+  initialization and rotation. Its current private snapshot stores an HMAC-SHA256
+  of a random salt keyed by that token. Each authenticated request verifies against
+  the current snapshot, including requests following a published rotation.
 - Node enrollment and configuration delivery use authenticated service WireGuard
   on the shared UDP port, independently of HTTP REST. External HTTP cannot dispatch
   these internal RPCs; issuing an invitation is an administrative operation, not

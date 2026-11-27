@@ -280,14 +280,15 @@ wgfeel serve --control child --state-dir /srv/wgfeel/state \
 ### wgfeel join
 
 ```text
-wgfeel join INVITATION [OPTIONS]
+wgfeel join INVITATION|--invitation-stdin [OPTIONS]
 ```
 
 Enroll the local child using a one-time invitation over service WireGuard on the shared UDP port. The installed child uses the UDP port from the invitation. Join enables and starts its service after saving configuration, unless installed with --no-start. Print main's UDP addresses immediately and progress every five seconds. Wait up to 75 seconds for durable configuration; a failed join preserves the previous binding unless replacement was committed.
 
 | Argument / option | Description |
 | --- | --- |
-| `INVITATION` | Required wgfeel://join/… invitation from wgfeel node add. |
+| `INVITATION` | One-time URI from wgfeel node add. Prefer --invitation-stdin to keep the URI out of command arguments. |
+| `--invitation-stdin` | Read a single invitation line from standard input. |
 | `--install-dir PATH` | Installation base. Defaults to the running installed binary's base, or /opt/wgfeel for a downloaded binary. |
 | `--state-dir PATH` | Local state directory. Use the installed instance's state directory or an explicitly provisioned absolute path. |
 | `--endpoint IP:PORT` | Advertised child endpoint. Repeat for IPv4 and IPv6; normally discovered automatically. |
@@ -295,7 +296,7 @@ Enroll the local child using a one-time invitation over service WireGuard on the
 Example:
 
 ```sh
-wgfeel join 'wgfeel://join/…'
+wgfeel join --invitation-stdin
 ```
 
 <a id="wgfeel-user"></a>

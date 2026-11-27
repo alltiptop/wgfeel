@@ -21,10 +21,7 @@ fn dns_labels_are_scoped_and_reserved_service_addresses_cannot_be_devices() {
         .into_iter()
         .enumerate()
         .map(|(index, d)| {
-            Network::new(NetworkId::new(&format!("net{index}")).unwrap(), vec![d])
-                .unwrap()
-                .with_dns_upstreams(vec!["127.0.0.1:5300".parse().unwrap()])
-                .unwrap()
+            Network::new(NetworkId::new(&format!("net{index}")).unwrap(), vec![d]).unwrap()
         })
         .collect();
     let config = Config::new(1, networks, Policy::new(vec![], vec![], vec![])).unwrap();
@@ -56,18 +53,4 @@ fn dns_labels_are_scoped_and_reserved_service_addresses_cannot_be_devices() {
             Err(DomainError::InvalidHostname)
         );
     }
-    let network = &config.networks()[0];
-    assert_eq!(
-        network
-            .with_devices(network.devices().to_vec())
-            .unwrap()
-            .dns_upstreams(),
-        network.dns_upstreams()
-    );
-    assert!(
-        network
-            .clone()
-            .with_dns_upstreams(vec!["10.203.0.1:53".parse().unwrap()])
-            .is_err()
-    );
 }

@@ -249,13 +249,16 @@ Examples:
 .fi
 .SS join
 .nf
-\&wgfeel join INVITATION [OPTIONS]
+\&wgfeel join INVITATION|\-\-invitation\-stdin [OPTIONS]
 .fi
 .PP
 \&Enroll the local child using a one\-time invitation over service WireGuard on the shared UDP port. The installed child uses the UDP port from the invitation. Join enables and starts its service after saving configuration, unless installed with \-\-no\-start. Print main's UDP addresses immediately and progress every five seconds. Wait up to 75 seconds for durable configuration; a failed join preserves the previous binding unless replacement was committed.
 .TP
 .B \&INVITATION
-\&Required wgfeel://join/… invitation from wgfeel node add.
+\&One\-time URI from wgfeel node add. Prefer \-\-invitation\-stdin to keep the URI out of command arguments.
+.TP
+.B \&\-\-invitation\-stdin
+\&Read a single invitation line from standard input.
 .TP
 .B \&\-\-install\-dir PATH
 \&Installation base. Defaults to the running installed binary's base, or /opt/wgfeel for a downloaded binary.
@@ -268,7 +271,7 @@ Examples:
 .PP
 Examples:
 .nf
-\&wgfeel join 'wgfeel://join/…'
+\&wgfeel join \-\-invitation\-stdin
 .fi
 .SS user
 .nf

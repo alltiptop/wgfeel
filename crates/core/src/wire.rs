@@ -1,7 +1,7 @@
 //! Untrusted JSON is decoded into private DTOs, then passed through constructors.
 use crate::*;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,8 +20,6 @@ struct RawNetwork {
     private_lan: bool,
     #[serde(default)]
     suspended: bool,
-    #[serde(default = "crate::config::default_dns_upstreams")]
-    dns_upstreams: Vec<SocketAddr>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,11 +102,10 @@ impl Config {
                         .and_then(|device| device.with_gateway(gateway).with_hostname(d.hostname))
                     })
                     .collect::<Result<_, _>>()?;
-                Network::new(NetworkId::new(&n.id)?, devices).and_then(|network| {
+                Network::new(NetworkId::new(&n.id)?, devices).map(|network| {
                     network
                         .with_private_lan(n.private_lan)
                         .with_suspended(n.suspended)
-                        .with_dns_upstreams(n.dns_upstreams)
                 })
             })
             .collect::<Result<_, _>>()?;

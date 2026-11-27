@@ -365,7 +365,7 @@ mod tests {
             assert_eq!(meta.nlink(), 1);
         }
         let json = fs::read_to_string(directory.state().join("state.json")).unwrap();
-        assert!(json.contains("\"management_storage_version\":5"));
+        assert!(json.contains("\"management_storage_version\":6"));
         assert!(!json.contains("\"admin_credential\""));
         assert!(
             !fs::read_to_string(directory.profile())

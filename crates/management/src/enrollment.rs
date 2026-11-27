@@ -137,13 +137,13 @@ impl Invitations {
     }
     /// `authenticated_key` must come from successful WireGuard authentication,
     /// never from an HTTP header, address or request body.
-    pub fn claim(
+    fn checked_claim(
         &mut self,
         id: &NodeId,
         authenticated_key: &DevicePublicKey,
-        claim: EnrollmentClaim,
+        claim: &EnrollmentClaim,
         now: Instant,
-    ) -> Result<&EnrollmentClaim, EnrollmentError> {
+    ) -> Result<&mut Entry, EnrollmentError> {
         let entry = self.entry(id, authenticated_key, now)?;
         if claim.public_keys().contains(&&entry.temporary_public_key)
             || claim.public_keys().contains(&&entry.management_public_key)
@@ -153,10 +153,31 @@ impl Invitations {
         if entry
             .claim
             .as_ref()
-            .is_some_and(|existing| existing != &claim)
+            .is_some_and(|existing| existing != claim)
         {
             return Err(EnrollmentError::AlreadyClaimed);
         }
+        Ok(entry)
+    }
+    pub fn claim_generation(
+        &mut self,
+        id: &NodeId,
+        key: &DevicePublicKey,
+        claim: &EnrollmentClaim,
+        now: Instant,
+    ) -> Result<Option<u64>, EnrollmentError> {
+        Ok(self
+            .checked_claim(id, key, claim, now)?
+            .activated_generation)
+    }
+    pub fn claim(
+        &mut self,
+        id: &NodeId,
+        key: &DevicePublicKey,
+        claim: EnrollmentClaim,
+        now: Instant,
+    ) -> Result<&EnrollmentClaim, EnrollmentError> {
+        let entry = self.checked_claim(id, key, &claim, now)?;
         Ok(entry.claim.get_or_insert(claim))
     }
     pub fn claimed(

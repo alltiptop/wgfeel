@@ -126,26 +126,33 @@ impl Router {
         self.contexts[slot].lease.generation()
     }
 
-    /// Move admission metadata with an idle service worker. The new registry
-    /// owns its own lease; old routes are retired before the worker is moved.
-    pub(super) fn inherit_service(&mut self, previous: &mut Self) -> Result<(), WireGuardError> {
-        let slot = self
-            .contexts
-            .iter()
-            .position(|context| context.id == ContextId::Service)
-            .ok_or(WireGuardError::UnknownContext)?;
-        let old = previous
-            .contexts
-            .iter()
-            .position(|context| context.id == ContextId::Service)
-            .ok_or(WireGuardError::UnknownContext)?;
+    pub(super) fn prepare_routes(
+        &mut self,
+        slot: usize,
+        previous: &Self,
+        old: usize,
+    ) -> Result<(), WireGuardError> {
+        if self.contexts[slot].id != previous.contexts[old].id {
+            return Err(WireGuardError::InvalidConfiguration);
+        }
         let (peers, bindings) = previous
             .registry
-            .service_snapshot(&previous.contexts[old].lease)
+            .context_snapshot(&previous.contexts[old].lease)
             .map_err(dispatch_error)?;
-        self.registry
-            .replace_service_peers(&self.contexts[slot].lease, peers, bindings)
-            .map_err(dispatch_error)?;
+        if self.contexts[slot].id == ContextId::Service {
+            self.replace_service_peers(slot, peers, bindings)
+                .map_err(dispatch_error)
+        } else {
+            self.publish(slot, bindings)
+        }
+    }
+
+    pub(super) fn move_admission(
+        &mut self,
+        slot: usize,
+        previous: &mut Self,
+        old: usize,
+    ) -> Result<(), WireGuardError> {
         previous.release(old)?;
         std::mem::swap(
             &mut self.contexts[slot].limiter,
@@ -159,8 +166,24 @@ impl Router {
     }
 
     pub fn admit(&mut self, source: SocketAddr, bytes: &[u8]) -> Result<Admission, WireGuardError> {
+        self.admit_scoped(source, bytes, None)
+    }
+
+    pub fn admit_scoped(
+        &mut self,
+        source: SocketAddr,
+        bytes: &[u8],
+        expected: Option<(usize, &PeerId)>,
+    ) -> Result<Admission, WireGuardError> {
         match self.registry.route(bytes).map_err(dispatch_error)? {
             RouteHint::NeedsHandshakeAdmission => {
+                if let Some((slot, peer)) = expected {
+                    return Ok(Admission {
+                        slot,
+                        peer: Some(peer.clone()),
+                        verified: self.verify(slot, source, bytes)?,
+                    });
+                }
                 let mut source_capped = false;
                 for slot in 0..self.contexts.len() {
                     if !self.contexts[slot].active {
@@ -197,7 +220,9 @@ impl Router {
                     .iter()
                     .position(|c| c.id == context)
                     .ok_or(WireGuardError::Protocol)?;
-                if !self.contexts[slot].active
+                if expected.is_some_and(|(expected_slot, expected_peer)| {
+                    slot != expected_slot || &peer != expected_peer
+                }) || !self.contexts[slot].active
                     || self.contexts[slot].lease.generation() != generation
                 {
                     return Err(WireGuardError::Protocol);
@@ -366,6 +391,35 @@ mod tests {
     }
 
     #[test]
+    fn scoped_receiver_index_requires_both_the_context_and_peer() {
+        let mut router = router(true);
+        let bytes = packet(42);
+        router
+            .publish(
+                1,
+                vec![IndexBinding {
+                    index: 42,
+                    peer: device(),
+                }],
+            )
+            .unwrap();
+        let source = "127.0.0.1:9000".parse().unwrap();
+        let route = router.registry.route(&bytes).unwrap();
+        for (slot, peer) in [(0, device()), (1, admin())] {
+            assert!(
+                router
+                    .admit_scoped(source, &bytes, Some((slot, &peer)))
+                    .is_err()
+            );
+            assert_eq!(router.registry.route(&bytes).unwrap(), route);
+        }
+        let admitted = router
+            .admit_scoped(source, &bytes, Some((1, &device())))
+            .unwrap();
+        assert_eq!(admitted.peer, Some(device()));
+    }
+
+    #[test]
     fn service_handoff_preserves_indices_and_tenants_across_different_slots_and_leases() {
         let mut previous = router(true);
         previous.restart(0).unwrap();
@@ -396,7 +450,8 @@ mod tests {
             }],
         )
         .unwrap();
-        next.inherit_service(&mut previous).unwrap();
+        next.prepare_routes(1, &previous, 0).unwrap();
+        next.move_admission(1, &mut previous, 0).unwrap();
         for (router, index, context, peer) in [
             (&next, 100, ContextId::Service, admin()),
             (&next, 300, tenant(), device()),
@@ -418,7 +473,7 @@ mod tests {
         assert!(matches!(
             previous
                 .registry
-                .service_snapshot(&previous.contexts[0].lease),
+                .context_snapshot(&previous.contexts[0].lease),
             Err(DispatchError::InvalidLease)
         ));
     }
@@ -444,7 +499,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert!(next.inherit_service(&mut previous).is_err());
+        assert!(next.prepare_routes(1, &previous, 0).is_err());
         assert_eq!(
             previous.registry.route(&packet(100)).unwrap(),
             RouteHint::Receiver {

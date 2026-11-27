@@ -1,14 +1,18 @@
 use std::{
     ffi::OsString,
-    io::{self, Write},
+    io::{self, BufRead, IsTerminal, Write},
     net::SocketAddr,
     path::PathBuf,
     time::{Duration, Instant},
 };
-use wgfeel_protocol::{Request, enrollment::Invitation};
+use wgfeel_protocol::{
+    Request,
+    enrollment::{Invitation, MAX_INVITATION_URI},
+};
 use zeroize::Zeroizing;
 pub(crate) const PATH: &str = "/internal/v1/join";
-const USAGE: &str = "wgfeel join INVITATION [--endpoint IP:PORT] [--install-dir PATH]";
+const USAGE: &str =
+    "wgfeel join INVITATION|--invitation-stdin [--endpoint IP:PORT] [--install-dir PATH]";
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,28 +77,115 @@ impl Failure {
     }
 }
 
-pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
-    let Some(uri) = args.first().and_then(|arg| arg.to_str()) else {
-        return Err(USAGE);
-    };
-    let invitation = Invitation::decode(uri)?;
+fn read_invitation(input: impl BufRead) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+    // Room for CRLF and one extra byte to detect a truncated overlong line.
+    let limit = MAX_INVITATION_URI + 3;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(limit));
+    input
+        .take(limit as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| "cannot read invitation from stdin")?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    if bytes.is_empty() || bytes.len() > MAX_INVITATION_URI {
+        return Err("invalid invitation length");
+    }
+    Ok(bytes)
+}
+
+enum InvitationArg<'a> {
+    Literal(&'a str),
+    Stdin,
+}
+
+struct ParsedArgs<'a> {
+    invitation: InvitationArg<'a>,
+    state: PathBuf,
+    endpoints: Vec<SocketAddr>,
+}
+
+fn parse_args(args: &[OsString]) -> Result<ParsedArgs<'_>, &'static str> {
+    let mut invitation: Option<InvitationArg<'_>> = None;
     let mut state = wgfeel_host::default_install_dir()
         .join("instance")
         .join("state");
     let mut endpoints: Vec<SocketAddr> = vec![];
-    if !(args.len() - 1).is_multiple_of(2) {
-        return Err(USAGE);
-    }
-    for pair in args[1..].as_chunks::<2>().0 {
-        match pair[0].to_str() {
-            Some("--install-dir") => state = PathBuf::from(&pair[1]).join("instance").join("state"),
-            Some("--state-dir") => state = PathBuf::from(&pair[1]),
-            Some("--endpoint") => {
-                endpoints.push(pair[1].to_str().ok_or(USAGE)?.parse().map_err(|_| USAGE)?)
+    let mut index = 0;
+    while index < args.len() {
+        let Some(flag) = args[index].to_str() else {
+            return Err(USAGE);
+        };
+        match flag {
+            "--invitation-stdin" => {
+                if invitation.replace(InvitationArg::Stdin).is_some() {
+                    return Err(USAGE);
+                }
+                index += 1;
             }
-            _ => return Err(USAGE),
+            "--install-dir" => {
+                let value = args.get(index + 1).ok_or(USAGE)?;
+                state = PathBuf::from(value).join("instance").join("state");
+                index += 2;
+            }
+            "--state-dir" => {
+                let value = args.get(index + 1).ok_or(USAGE)?;
+                state = PathBuf::from(value);
+                index += 2;
+            }
+            "--endpoint" => {
+                let value = args.get(index + 1).and_then(|v| v.to_str()).ok_or(USAGE)?;
+                endpoints.push(value.parse().map_err(|_| USAGE)?);
+                index += 2;
+            }
+            arg if arg.starts_with('-') => return Err(USAGE),
+            literal => {
+                if invitation
+                    .replace(InvitationArg::Literal(literal))
+                    .is_some()
+                {
+                    return Err(USAGE);
+                }
+                index += 1;
+            }
         }
     }
+    let invitation = invitation.ok_or(USAGE)?;
+    wgfeel_core::validate_node_endpoints(&endpoints).map_err(|_| "invalid node endpoints")?;
+    Ok(ParsedArgs {
+        invitation,
+        state,
+        endpoints,
+    })
+}
+
+pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
+    // Validate all CLI flags before prompting or reading secret input from stdin.
+    let ParsedArgs {
+        invitation: source,
+        state,
+        mut endpoints,
+    } = parse_args(args)?;
+    let input = match source {
+        InvitationArg::Stdin => {
+            if io::stdin().is_terminal() {
+                eprintln!("Paste the invitation and press Enter:");
+            }
+            Some(read_invitation(io::stdin().lock())?)
+        }
+        InvitationArg::Literal(_) => None,
+    };
+    let uri = match (&source, &input) {
+        (InvitationArg::Stdin, Some(bytes)) => {
+            std::str::from_utf8(bytes).map_err(|_| "invalid invitation")?
+        }
+        (InvitationArg::Literal(literal), None) => literal,
+        _ => return Err("invalid invitation"),
+    };
+    let invitation = Invitation::decode(uri)?;
     let installed = wgfeel_host::install::child_settings(&state)?;
     if let Some(settings) = &installed
         && endpoints.is_empty()
@@ -105,20 +196,23 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
                 .iter()
                 .map(|ip| SocketAddr::new(*ip, invitation.mesh_port())),
         );
+        wgfeel_core::validate_node_endpoints(&endpoints).map_err(|_| "invalid node endpoints")?;
     }
-    wgfeel_core::validate_node_endpoints(&endpoints).map_err(|_| "invalid node endpoints")?;
     #[derive(serde::Serialize)]
     struct Input<'a> {
         invitation: &'a str,
         endpoints: &'a [SocketAddr],
     }
-    let body = Zeroizing::new(
-        serde_json::to_vec(&Input {
+    let mut body = Zeroizing::new(Vec::with_capacity(MAX_INVITATION_URI + 2048));
+    serde_json::to_writer(
+        &mut *body,
+        &Input {
             invitation: uri,
             endpoints: &endpoints,
-        })
-        .map_err(|_| "cannot encode join request")?,
-    );
+        },
+    )
+    .map_err(|_| "cannot encode join request")?;
+    drop(input);
     let mut progress = io::stderr().lock();
     writeln!(
         progress,
@@ -152,6 +246,8 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
                 )
                 .map_err(|_| "cannot write join progress")?;
                 drop(progress);
+                let manager = invitation.management().clone();
+                drop(invitation);
                 super::runtime::foreground(
                     &[
                         "--state-dir".into(),
@@ -159,14 +255,14 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
                         "--listen".into(),
                         listen.to_string().into(),
                     ],
-                    Some(&body),
+                    Some(body),
                 )?;
                 if settings.start_after_join {
                     wgfeel_host::install::activate_child(&state)?;
                 }
                 println!(
                     "Node joined Manager {}. Configuration saved. {}",
-                    invitation.management().as_str(),
+                    manager.as_str(),
                     if settings.start_after_join {
                         "Service enabled and started."
                     } else {
@@ -189,6 +285,7 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
             body: &body,
         },
     )?;
+    drop(body);
     if response.status == 409
         && serde_json::from_slice::<serde_json::Value>(&response.body)
             .ok()
@@ -266,5 +363,63 @@ pub(super) fn run(args: &[OsString]) -> Result<(), &'static str> {
             _ => return Err("invalid join status"),
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parse_args_rejects_unusable_or_duplicate_endpoints_before_reading_stdin() {
+        for endpoints in [
+            &["192.0.2.10:0"][..],
+            &["0.0.0.0:51820"],
+            &["192.0.2.10:51820", "192.0.2.10:51820"],
+        ] {
+            let mut args = os(&["--invitation-stdin"]);
+            for address in endpoints {
+                args.extend(os(&["--endpoint", address]));
+            }
+            assert_eq!(parse_args(&args).err(), Some("invalid node endpoints"));
+        }
+    }
+
+    #[test]
+    fn parse_args_accepts_stdin_flag_in_any_position_and_rejects_invalid_combinations() {
+        let stdin_args = os(&[
+            "--install-dir",
+            "/srv/wg",
+            "--endpoint",
+            "192.0.2.10:51820",
+            "--invitation-stdin",
+        ]);
+        let parsed = parse_args(&stdin_args).unwrap();
+        assert!(matches!(parsed.invitation, InvitationArg::Stdin));
+        assert_eq!(parsed.state, PathBuf::from("/srv/wg/instance/state"));
+        assert_eq!(parsed.endpoints, vec!["192.0.2.10:51820".parse().unwrap()]);
+
+        let literal_args = os(&["wgfeel://join/abc", "--state-dir", "/srv/state"]);
+        let literal = parse_args(&literal_args).unwrap();
+        assert!(matches!(
+            literal.invitation,
+            InvitationArg::Literal("wgfeel://join/abc")
+        ));
+        assert_eq!(literal.state, PathBuf::from("/srv/state"));
+
+        for invalid in [
+            &[][..],
+            &["--invitation-stdin", "--bad-flag"],
+            &["--invitation-stdin", "wgfeel://join/abc"],
+            &["wgfeel://join/abc", "--invitation-stdin"],
+            &["--invitation-stdin", "--invitation-stdin"],
+            &["--invitation-stdin", "--install-dir"],
+        ] {
+            assert!(parse_args(&os(invalid)).is_err());
+        }
     }
 }

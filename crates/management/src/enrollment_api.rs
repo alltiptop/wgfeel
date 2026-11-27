@@ -107,26 +107,25 @@ impl ManagementService {
             }
             let claim = EnrollmentClaim::decode(request.body)
                 .map_err(|_| ApiError(400, "invalid_enrollment"))?;
-            let state = self.delivery_snapshot().map_err(storage_error)?;
-            validate_identity(&state, &claim)?;
-            let now = Instant::now();
-            self.invitations
-                .claim(invitation, authenticated_key, claim.clone(), now)
-                .map_err(enrollment_error)?;
             let generation = self
                 .invitations
-                .generation(invitation, authenticated_key, now)
+                .claim_generation(invitation, authenticated_key, &claim, Instant::now())
                 .map_err(enrollment_error)?;
+            let state = self.delivery_snapshot().map_err(storage_error)?;
             if generation.is_some()
-                && !state
-                    .document()
-                    .routing()
-                    .assignments()
-                    .iter()
-                    .any(|node| node.recipient() == claim.node_id())
+                && !state.document().routing().assignments().iter().any(|node| {
+                    node.recipient() == claim.node_id()
+                        && node.service_public_key() == claim.public_key()
+                        && node.gateway_public_key() == claim.gateway_public_key()
+                })
             {
                 return Err(ApiError(410, "enrollment_revoked"));
             }
+            validate_identity(&state, &claim)?;
+            let claim = self
+                .invitations
+                .claim(invitation, authenticated_key, claim, Instant::now())
+                .map_err(enrollment_error)?;
             Ok(Response { status: if generation.is_some() { 200 } else { 202 }, generation, is_config: false,
                 body: serde_json::to_vec(&serde_json::json!({"node_id":claim.node_id(),"registered":generation.is_some()}))
                     .map_err(|_| ApiError(500, "encoding_failed"))? })
@@ -159,7 +158,6 @@ impl ManagementService {
                 return Err(ApiError(403, "invalid_node_proof"));
             }
             let state = self.delivery_snapshot().map_err(storage_error)?;
-            validate_identity(&state, &claim)?;
             let current = state
                 .document()
                 .routing()
@@ -170,16 +168,16 @@ impl ManagementService {
                 .invitations
                 .traffic(invitation, temporary_key, now)
                 .map_err(enrollment_error)?;
-            if current.is_some_and(|node| node.traffic() != traffic) {
-                return Err(ApiError(409, "traffic_mode_conflict"));
-            }
             if self
                 .invitations
                 .generation(invitation, temporary_key, now)
                 .map_err(enrollment_error)?
                 .is_some()
             {
-                if current.is_none() {
+                if current.is_none_or(|node| {
+                    node.service_public_key() != claim.public_key()
+                        || node.gateway_public_key() != claim.gateway_public_key()
+                }) {
                     return Err(ApiError(410, "enrollment_revoked"));
                 }
                 return Ok(Response {
@@ -188,6 +186,10 @@ impl ManagementService {
                     body: vec![],
                     is_config: false,
                 });
+            }
+            validate_identity(&state, &claim)?;
+            if current.is_some_and(|node| node.traffic() != traffic) {
+                return Err(ApiError(409, "traffic_mode_conflict"));
             }
             // Native WG profiles have one Endpoint. Do not export an address
             // that already failed the enrollment proof as their primary path.

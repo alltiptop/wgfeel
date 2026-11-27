@@ -134,6 +134,7 @@ enum Stage {
     Control(PeerId),
     Timer(PeerId),
     Forward(Origin, Option<Traffic>),
+    Cancelled(ContextId, Option<PeerId>),
     ConfigureEnrollment(Option<NodeId>),
     ConfigureControl(Vec<crate::PeerConfig>),
 }
@@ -141,6 +142,26 @@ enum Stage {
 struct Flight {
     request: RequestId,
     stage: Stage,
+}
+
+impl Stage {
+    /// Cancel stages carrying old-revision forwarding/relay decisions while
+    /// preserving raw crypto receives, timers and non-relay control operations.
+    fn across_revision(self, context: &ContextId) -> Self {
+        match self {
+            Self::Receive | Self::Timer(_) => self,
+            Self::Control(peer) if *context != ContextId::Gateway => Self::Control(peer),
+            Self::Control(peer) => Self::Cancelled(context.clone(), Some(peer)),
+            Self::Cancelled(origin, peer) => Self::Cancelled(origin, peer),
+            Self::Forward(origin, _) => Self::Cancelled(origin.context, Some(origin.peer)),
+            Self::ReceiveMesh {
+                network, origin, ..
+            } => Self::Cancelled(ContextId::Tenant(network), Some(PeerId::Gateway(origin))),
+            Self::ConfigureEnrollment(_) | Self::ConfigureControl(_) => {
+                Self::Cancelled(context.clone(), None)
+            }
+        }
+    }
 }
 
 /// Projection-bound local forwarding with crypto in confined processes.
@@ -154,8 +175,46 @@ pub struct LocalGateway {
     // Forwarding stores only provenance here, never pending plaintext.
     flights: Vec<Flight>,
     management: Option<NodeId>,
+    management_key: Option<DevicePublicKey>,
     enrollment: Option<NodeId>,
     control_peers: Vec<crate::PeerConfig>,
+}
+
+pub struct GatewayHandoff<'a> {
+    next: &'a mut LocalGateway,
+    previous: &'a mut LocalGateway,
+}
+
+impl GatewayHandoff<'_> {
+    pub fn projection(&self) -> &GatewayProjection {
+        self.next.projection()
+    }
+    pub fn activate(self) -> Result<(), LocalError> {
+        let inherited = self
+            .next
+            .raw
+            .take_workers(&mut self.previous.raw)
+            .map_err(LocalError::Worker)?;
+        if inherited
+            .iter()
+            .any(|(context, _)| *context == ContextId::Service)
+        {
+            self.next.control_peers = std::mem::take(&mut self.previous.control_peers);
+        }
+        for mut flight in self.previous.flights.drain(..) {
+            let Some((_, generation)) = inherited
+                .iter()
+                .find(|(context, _)| *context == flight.request.context)
+            else {
+                continue;
+            };
+            flight.request.generation = *generation;
+            flight.stage = flight.stage.across_revision(&flight.request.context);
+            self.next.flights.push(flight);
+        }
+        std::mem::swap(self.next, self.previous);
+        Ok(())
+    }
 }
 
 fn managed_service_peers(
@@ -288,6 +347,7 @@ impl LocalGateway {
             raw,
             flights,
             management: None,
+            management_key: None,
             enrollment: None,
             control_peers: Vec::new(),
         })
@@ -299,6 +359,50 @@ impl LocalGateway {
         tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
         limits: Limits,
         options: WorkerOptions,
+    ) -> Result<Self, LocalError> {
+        Self::managed(projection, management_key, node_key, tenants, |contexts| {
+            WorkerGateway::spawn(contexts, limits, options)
+        })
+    }
+
+    /// Validate all assigned keys before preparing only the changed crypto contexts.
+    pub fn prepare_replacement<'a>(
+        &self,
+        projection: &GatewayProjection,
+        management_key: &DevicePublicKey,
+        node_key: &NodeKeys,
+        tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
+    ) -> Result<Self, LocalError> {
+        let retain = self.management_key.as_ref() == Some(management_key)
+            && self.projection.management_id() == projection.management_id()
+            && self.projection.recipient() == projection.recipient()
+            && self.projection.control_mode() == projection.control_mode()
+            && projection.generation() > self.projection.generation()
+            && !self.projection.is_revoked()
+            && !projection.is_revoked()
+            && self.enrollment.is_none()
+            && !self
+                .flights
+                .iter()
+                .any(|flight| matches!(flight.stage, Stage::ConfigureEnrollment(_)));
+        let retain_main_service = projection.control_mode() == wgfeel_core::ControlMode::Main
+            && self.projection.mesh().iter().all(|old| {
+                projection.mesh().iter().any(|new| {
+                    old.recipient() == new.recipient()
+                        && old.service_public_key() == new.service_public_key()
+                })
+            });
+        Self::managed(projection, management_key, node_key, tenants, |contexts| {
+            self.raw.replacement(contexts, retain, retain_main_service)
+        })
+    }
+
+    fn managed<'a>(
+        projection: &GatewayProjection,
+        management_key: &DevicePublicKey,
+        node_key: &NodeKeys,
+        tenants: impl IntoIterator<Item = (&'a NetworkId, &'a TenantPrivateKey)>,
+        build: impl FnOnce(Vec<crate::ContextConfig>) -> Result<WorkerGateway, WorkerError>,
     ) -> Result<Self, LocalError> {
         let mut contexts = local_contexts(
             projection,
@@ -314,15 +418,42 @@ impl LocalGateway {
             .ok_or(LocalError::Worker(WorkerError::InvalidConfiguration))?;
         service.peers = managed_service_peers(projection, management_key)?;
         let flights = Vec::with_capacity(contexts.len());
-        let raw = WorkerGateway::spawn(contexts, limits, options).map_err(LocalError::Worker)?;
+        let raw = build(contexts).map_err(LocalError::Worker)?;
         Ok(Self {
             projection: projection.clone(),
             raw,
             flights,
+            management_key: Some(management_key.clone()),
             management: (projection.recipient() != projection.management_id())
                 .then(|| projection.management_id().clone()),
             enrollment: None,
             control_peers: Vec::new(),
+        })
+    }
+
+    pub fn starting_workers(&self) -> usize {
+        self.raw.startup_count()
+    }
+
+    /// The exclusive borrows fence changes between validation, durable publication and activation.
+    pub fn handoff<'a>(
+        &'a mut self,
+        previous: &'a mut Self,
+    ) -> Result<GatewayHandoff<'a>, LocalError> {
+        if previous.flights.iter().any(|flight| {
+            matches!(
+                flight.stage,
+                Stage::ConfigureEnrollment(_) | Stage::ConfigureControl(_)
+            )
+        }) {
+            return Err(LocalError::Worker(WorkerError::Busy));
+        }
+        self.raw
+            .prepare_handoff(&previous.raw)
+            .map_err(LocalError::Worker)?;
+        Ok(GatewayHandoff {
+            next: self,
+            previous,
         })
     }
 
@@ -578,9 +709,11 @@ impl LocalGateway {
         {
             return Err(LocalError::Forward(ForwardError::Denied));
         }
+        let context = ContextId::Tenant(network.clone());
+        let peer = PeerId::Gateway(origin.clone());
         match self
             .raw
-            .receive_datagram(endpoint, bytes)
+            .receive_mesh(endpoint, bytes, &context, &peer)
             .map_err(LocalError::Worker)?
         {
             Submission::Queued(request) => {
@@ -594,46 +727,29 @@ impl LocalGateway {
                 });
                 Ok(None)
             }
-            Submission::Immediate(DatagramEvent::Network { packet, .. }) => {
-                Ok(Some(LocalEvent::MeshOutput {
-                    network: network.clone(),
-                    peer: origin.clone(),
-                    packet,
-                    traffic: None,
-                }))
-            }
+            Submission::Immediate(DatagramEvent::Network {
+                context: actual,
+                peer: Some(sender),
+                packet,
+                ..
+            }) if actual == context && sender == peer => Ok(Some(LocalEvent::MeshOutput {
+                network: network.clone(),
+                peer: origin.clone(),
+                packet,
+                traffic: None,
+            })),
             _ => Err(LocalError::Worker(WorkerError::Protocol)),
         }
     }
-    /// Preserve main's authenticated service sessions across a prepared update.
-    /// Call only after draining worker results; retire the previous gateway after
-    /// success and refresh service peers for the new mesh before announcing readiness.
-    pub fn inherit_main_service(&mut self, previous: &mut Self) -> Result<(), LocalError> {
-        if self.projection.control_mode() != wgfeel_core::ControlMode::Main
-            || previous.projection.control_mode() != wgfeel_core::ControlMode::Main
-            || self.projection.management_id() != previous.projection.management_id()
-            || self.projection.generation() <= previous.projection.generation()
-            || self.projection.is_revoked()
-            || previous.projection.is_revoked()
-            || self.enrollment.is_some()
-            || previous.enrollment.is_some()
-        {
-            return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
-        }
-        self.raw
-            .inherit_service(&mut previous.raw)
-            .map_err(LocalError::Worker)?;
-        self.control_peers = previous.control_peers.clone();
-        Ok(())
-    }
-
     /// Preserve crypto sessions when only policy/public revision changes.
     pub fn can_replace_projection(&self, next: &GatewayProjection) -> bool {
         self.enrollment.is_none()
-            && !self
-                .flights
-                .iter()
-                .any(|flight| matches!(flight.stage, Stage::ConfigureEnrollment(_)))
+            && !self.flights.iter().any(|flight| {
+                matches!(
+                    flight.stage,
+                    Stage::ConfigureEnrollment(_) | Stage::ConfigureControl(_)
+                )
+            })
             && self.raw.workers().iter().all(|worker| {
                 matches!(
                     worker.state,
@@ -645,22 +761,33 @@ impl LocalGateway {
             && self.projection.mesh() == next.mesh()
             && self.projection.is_revoked() == next.is_revoked()
             && self.projection.assignment().tenants().iter().all(|tenant| {
-                let devices = |projection: &GatewayProjection| {
+                fn devices<'a>(
+                    projection: &'a GatewayProjection,
+                    id: &NetworkId,
+                ) -> Option<&'a [wgfeel_core::Device]> {
                     projection
                         .config()
                         .networks()
                         .iter()
-                        .find(|network| network.id() == tenant.network())
-                        .map(|network| network.devices().to_vec())
-                };
-                devices(&self.projection) == devices(next)
+                        .find(|network| network.id() == id)
+                        .map(wgfeel_core::Network::devices)
+                }
+                devices(&self.projection, tenant.network()) == devices(next, tenant.network())
             })
     }
     pub fn replace_projection(&mut self, next: &GatewayProjection) -> Result<(), LocalError> {
         if next.generation() <= self.projection.generation() || !self.can_replace_projection(next) {
             return Err(LocalError::Worker(WorkerError::InvalidConfiguration));
         }
-        self.flights.clear(); // No previously authorized in-flight result crosses a new policy.
+        // Cancel old-revision forwarding/relay flights without breaking 1:1
+        // request tracking for raw crypto receives, timers and control ops.
+        for flight in &mut self.flights {
+            let stage = std::mem::replace(
+                &mut flight.stage,
+                Stage::Cancelled(flight.request.context.clone(), None),
+            );
+            flight.stage = stage.across_revision(&flight.request.context);
+        }
         self.projection = next.clone();
         Ok(())
     }
@@ -869,6 +996,9 @@ impl LocalGateway {
                             let _ = self.reset(&request.context, &peer);
                         }
                         emit(request.context, Some(peer), result, None)
+                    }
+                    Stage::Cancelled(context, peer) => {
+                        Some(dropped(context, peer, LocalError::Cancelled))
                     }
                     Stage::Forward(origin, traffic) => {
                         // A reply already in another worker's pipe must not
@@ -1247,6 +1377,50 @@ mod capability_tests {
                 command()
             ),
             LocalEvent::Dropped { .. }
+        ));
+    }
+
+    #[test]
+    fn revision_flight_transition_cancels_forwarding_and_relay_while_preserving_crypto_work() {
+        let tenant = ContextId::Tenant(NetworkId::new("alice").unwrap());
+        let peer = PeerId::Device(wgfeel_core::DeviceId::new("phone").unwrap());
+        let node = PeerId::Node(NodeId::new("child").unwrap());
+        assert!(matches!(
+            Stage::Receive.across_revision(&tenant),
+            Stage::Receive
+        ));
+        assert!(matches!(
+            Stage::Timer(peer.clone()).across_revision(&tenant),
+            Stage::Timer(_)
+        ));
+        assert!(matches!(
+            Stage::Control(node.clone()).across_revision(&ContextId::Service),
+            Stage::Control(_)
+        ));
+        assert!(matches!(
+            Stage::Control(node.clone()).across_revision(&ContextId::Gateway),
+            Stage::Cancelled(ContextId::Gateway, Some(_))
+        ));
+        assert!(matches!(
+            Stage::Forward(
+                Origin {
+                    context: tenant.clone(),
+                    generation: 1,
+                    peer: peer.clone(),
+                },
+                None,
+            )
+            .across_revision(&tenant),
+            Stage::Cancelled(ContextId::Tenant(_), Some(PeerId::Device(_)))
+        ));
+        assert!(matches!(
+            Stage::ReceiveMesh {
+                network: NetworkId::new("alice").unwrap(),
+                origin: NodeId::new("remote").unwrap(),
+                traffic: None,
+            }
+            .across_revision(&tenant),
+            Stage::Cancelled(ContextId::Tenant(_), Some(PeerId::Gateway(_)))
         ));
     }
 }

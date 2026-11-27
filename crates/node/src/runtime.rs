@@ -124,7 +124,10 @@ pub(super) fn run(args: &[OsString]) -> ExitCode {
     }
 }
 
-pub(super) fn foreground(args: &[OsString], join: Option<&[u8]>) -> Result<(), &'static str> {
+pub(super) fn foreground(
+    args: &[OsString],
+    join: Option<zeroize::Zeroizing<Vec<u8>>>,
+) -> Result<(), &'static str> {
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGINT);
     mask.add(Signal::SIGTERM);
@@ -135,10 +138,9 @@ pub(super) fn foreground(args: &[OsString], join: Option<&[u8]>) -> Result<(), &
         let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_CLOEXEC | SfdFlags::SFD_NONBLOCK)
             .map_err(|_| "cannot watch shutdown signals")?;
         let logger = Logger::new().map_err(|_| "cannot start node logger")?;
+        let standalone = join.is_none();
         let result = serve(args, &signals, &logger, join);
-        if join.is_none()
-            && let Err(error) = &result
-        {
+        if standalone && let Err(error) = &result {
             logger.emit(Log::Error(error));
         }
         logger.finish();
@@ -162,8 +164,9 @@ fn serve(
     args: &[OsString],
     signals: &SignalFd,
     logger: &Logger,
-    bootstrap: Option<&[u8]>,
+    bootstrap: Option<zeroize::Zeroizing<Vec<u8>>>,
 ) -> Result<(), &'static str> {
+    let enrolling = bootstrap.is_some();
     if args.len() != 4 || args[0] != "--state-dir" {
         return Err(USAGE);
     }
@@ -212,7 +215,7 @@ fn serve(
     let mut timers = timers(&gateway, managed);
     let mut remaining = gateway.workers().len();
     while remaining != 0 {
-        if stopping(signals, bootstrap.is_some())? {
+        if stopping(signals, enrolling)? {
             return Ok(());
         }
         for _ in 0..BATCH {
@@ -233,7 +236,7 @@ fn serve(
                 .map_err(|_| "cannot wait for node workers")?;
         }
     }
-    if stopping(signals, bootstrap.is_some())? {
+    if stopping(signals, enrolling)? {
         return Ok(());
     }
     let start = Instant::now();
@@ -244,7 +247,7 @@ fn serve(
             .map_err(|_| "cannot create control transport")?,
     );
     let state_dir = PathBuf::from(&args[1]);
-    let mut local = if bootstrap.is_none() {
+    let mut local = if !enrolling {
         Some(crate::local::Server::bind(&state_dir.join("api.sock"))?)
     } else {
         None
@@ -260,7 +263,7 @@ fn serve(
     let mut enrollment_outgoing = std::collections::VecDeque::new();
     let mut outgoing = std::collections::VecDeque::new();
     let mut mesh = mesh::Runtime::new(gateway.projection())?;
-    let mut dns = dns::Runtime::new()?;
+    let mut dns = dns::Runtime::default();
     let mut updates = control::Updates::default();
     let mut buffer = [0; MAX_DATAGRAM_SIZE + 1];
     let mut incoming = std::collections::VecDeque::new();
@@ -277,7 +280,7 @@ fn serve(
                 target: crate::join::PATH,
                 authorization: None,
                 if_match: None,
-                body,
+                body: &body,
             },
         );
         if response.status != 202 {
@@ -288,7 +291,7 @@ fn serve(
     }
     let mut progress = Instant::now();
     loop {
-        if stopping(signals, bootstrap.is_some())? {
+        if stopping(signals, enrolling)? {
             return Ok(());
         }
         let was_joining = joining.active();
@@ -297,7 +300,7 @@ fn serve(
                 joining.local(&store, &gateway, &state_dir, listen, managed_port, request)
             })?;
         }
-        if bootstrap.is_some() {
+        if enrolling {
             if let Some(result) = joining.result() {
                 return result;
             }
@@ -422,24 +425,29 @@ fn serve(
             }
             enrollment_outgoing.pop_front();
         }
-        if updates.poll(&mut store, &mut gateway)? {
+        if let Some(activation) = updates.poll(&mut store, &mut gateway)? {
             managed = store
                 .load()
                 .map_err(|_| "cannot inspect committed node authority")?
                 .is_some_and(|state| state.management_public_key().is_some());
             timers = self::timers(&gateway, managed);
-            outgoing.clear();
             incoming.clear();
             enrollment_outgoing.clear();
-            if let Some(control) = &mut control {
-                control
-                    .reset_session()
-                    .map_err(|_| "cannot reset committed control transport")?;
+            if matches!(activation, control::Activation::NewAuthority) {
+                outgoing.clear();
+                if let Some(control) = &mut control {
+                    control
+                        .reset_session()
+                        .map_err(|_| "cannot reset committed control transport")?;
+                }
             }
             enrollment_tcp
                 .reset_session()
                 .map_err(|_| "cannot reset committed enrollment transport")?;
-            mesh = mesh::Runtime::new(gateway.projection())?;
+            mesh = match activation {
+                control::Activation::SameAuthority => mesh.replacement(gateway.projection())?,
+                control::Activation::NewAuthority => mesh::Runtime::new(gateway.projection())?,
+            };
             dns.reset();
         }
         let now = Instant::now();

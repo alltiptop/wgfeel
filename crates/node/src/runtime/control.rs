@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 use wgfeel_core::{DevicePublicKey, GatewayProjection, NodeId, TenantPrivateKey};
 use wgfeel_protocol::{Request, Response};
 use wgfeel_store::{GatewayDelivery, LocalTenants, Store, StoreError, StoredState};
-use wgfeel_wireguard::{Limits, worker::LocalEvent};
+use wgfeel_wireguard::{
+    Limits,
+    worker::{LocalError, LocalEvent, WorkerError},
+};
 
 pub(super) fn options() -> WorkerOptions {
     WorkerOptions {
@@ -51,6 +54,11 @@ struct Candidate {
     pin: DevicePublicKey,
     joined: bool,
 }
+pub(super) enum Activation {
+    SameAuthority,
+    NewAuthority,
+}
+
 #[derive(Default)]
 pub(super) struct Updates {
     pending: Option<Candidate>,
@@ -188,23 +196,21 @@ impl Updates {
         };
         // Crypto validation and worker readiness precede the commit. The old
         // runtime continues forwarding while this isolated candidate starts.
-        let candidate = match LocalGateway::spawn_managed(
+        let candidate = match gateway.prepare_replacement(
             &next,
             pin,
             state.node_keys(),
             tenants
                 .network_ids()
                 .filter_map(|id| tenants.private_key(id).map(|key| (id, key))),
-            Limits::default(),
-            options(),
         ) {
             Ok(candidate) => candidate,
             Err(_) => return Response::error(422, "invalid_local_contexts"),
         };
         self.pending = Some(Candidate {
+            remaining: candidate.starting_workers(),
             gateway: candidate,
             tenants,
-            remaining: next.assignment().tenants().len() + 2,
             deadline: Instant::now() + Duration::from_secs(10),
             prior: current.clone(),
             prior_pin: state.management_public_key().cloned(),
@@ -214,33 +220,45 @@ impl Updates {
         pending_response(next.generation())
     }
 
-    /// Returns true only after durable publication and runtime replacement.
+    /// Reports which authenticated transport can outlive the published revision.
     pub(super) fn poll(
         &mut self,
         store: &mut Store,
         gateway: &mut LocalGateway,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<Option<Activation>, &'static str> {
         let Some(candidate) = self.pending.as_mut() else {
-            return Ok(false);
+            return Ok(None);
         };
         if Instant::now() > candidate.deadline {
             self.pending = None;
-            return Ok(false);
+            return Ok(None);
         }
         for _ in 0..super::BATCH {
             match candidate.gateway.poll() {
-                Some(LocalEvent::Ready { .. }) => candidate.remaining -= 1,
+                Some(LocalEvent::Ready { .. }) => {
+                    candidate.remaining = candidate
+                        .remaining
+                        .checked_sub(1)
+                        .ok_or("unexpected child worker readiness")?
+                }
                 Some(_) => {
                     self.pending = None;
-                    return Ok(false);
+                    return Ok(None);
                 }
                 None => break,
             }
         }
         if candidate.remaining != 0 {
-            return Ok(false);
+            return Ok(None);
         }
-        let candidate = self.pending.take().expect("pending candidate");
+        let handoff = match candidate.gateway.handoff(gateway) {
+            Ok(handoff) => handoff,
+            Err(LocalError::Worker(WorkerError::Busy)) => return Ok(None),
+            Err(_) => {
+                self.pending = None;
+                return Ok(None);
+            }
+        };
         let state = store
             .load()
             .map_err(|_| "cannot read Node state during apply")?
@@ -248,20 +266,21 @@ impl Updates {
         if state.projection() != &candidate.prior
             || state.management_public_key() != candidate.prior_pin.as_ref()
         {
-            return Ok(false);
+            self.pending = None;
+            return Ok(None);
         }
         let committed = if candidate.joined {
             store.accept_manager_with_checkpoint(
                 &candidate.prior,
                 candidate.prior_pin.as_ref(),
-                candidate.gateway.projection(),
+                handoff.projection(),
                 &candidate.tenants,
                 &candidate.pin,
                 |_| Ok(()),
             )
         } else {
             store.commit_managed_projection(
-                candidate.gateway.projection(),
+                handoff.projection(),
                 state.node_keys(),
                 &candidate.tenants,
                 &candidate.pin,
@@ -276,22 +295,28 @@ impl Updates {
                     .load()
                     .map_err(|_| "uncertain Node state; stopping forwarding")?
                     .ok_or("uncertain Node state; stopping forwarding")?;
-                if published.projection() != candidate.gateway.projection()
+                if published.projection() != handoff.projection()
                     || published.management_public_key() != Some(&candidate.pin)
                 {
                     return Err("uncertain Node state; stopping forwarding");
                 }
             }
-            Err(_) => return Ok(false),
+            Err(_) => {
+                self.pending = None;
+                return Ok(None);
+            }
         }
-        if gateway.can_replace_projection(candidate.gateway.projection()) {
-            gateway
-                .replace_projection(candidate.gateway.projection())
-                .map_err(|_| "cannot activate committed Node policy")?;
+        handoff
+            .activate()
+            .map_err(|_| "cannot activate committed Node policy")?;
+        let same_authority = candidate.prior_pin.as_ref() == Some(&candidate.pin)
+            && candidate.prior.management_id() == gateway.projection().management_id();
+        self.pending = None;
+        Ok(Some(if same_authority {
+            Activation::SameAuthority
         } else {
-            *gateway = candidate.gateway;
-        }
-        Ok(true)
+            Activation::NewAuthority
+        }))
     }
 }
 fn selected_tenants(

@@ -364,3 +364,53 @@ fn verified_activation_is_durable_and_repeat_join_has_one_membership_and_stable_
     );
     assert_eq!(fixture.bytes(), registered);
 }
+
+#[test]
+fn conflicting_candidate_does_not_consume_invitation_and_removal_revokes_activated_attempt() {
+    let fixture = Fixture::new();
+    let mut service = fixture.open();
+    let (invitation, peer) = issue(&mut service);
+    let candidate = claim();
+    let conflict = EnrollmentClaim::new(
+        node("manager"),
+        candidate.public_key().clone(),
+        candidate.gateway_public_key().clone(),
+        candidate.hostname().into(),
+        candidate.endpoints().to_vec(),
+        node("conflict-attempt"),
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&conflict).unwrap();
+    assert_eq!(
+        service
+            .handle_enrollment(invitation.id(), &key(99), request(ENROLLMENT_PATH, &body))
+            .status,
+        410
+    );
+    assert_eq!(
+        service
+            .handle_enrollment(invitation.id(), &peer, request(ENROLLMENT_PATH, &body))
+            .status,
+        409
+    );
+    assert_eq!(submit(&mut service, &invitation, &peer).status, 202);
+    let activate = |service: &mut ManagementService| {
+        service.complete_enrollment(
+            invitation.id(),
+            &peer,
+            candidate.public_key(),
+            candidate.endpoints()[0],
+        )
+    };
+    assert_eq!(activate(&mut service).status, 200);
+    let removal = service.handle_local(Request {
+        method: "DELETE",
+        target: "/api/v1/gateways/node-1",
+        if_match: Some("\"2\""),
+        authorization: None,
+        body: b"",
+    });
+    assert!((200..300).contains(&removal.status));
+    assert_eq!(submit(&mut service, &invitation, &peer).status, 410);
+    assert_eq!(activate(&mut service).status, 410);
+}

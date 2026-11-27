@@ -127,24 +127,28 @@ impl ManagementService {
     }
 
     fn dispatch(&mut self, request: Request<'_>, local: bool) -> Result<Response, ApiError> {
+        let supplied = if local {
+            None
+        } else {
+            Some(
+                request
+                    .authorization
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .and_then(|value| decode_key(value).ok())
+                    .ok_or(ApiError(401, "unauthorized"))?,
+            )
+        };
+        if request.body.len() > MAX_REQUEST_BODY {
+            return Err(ApiError(413, "body_too_large"));
+        }
         // No cached authority/revision survives a failed or uncertain commit.
         let state = self
             .store
             .load()
             .map_err(storage_error)?
             .ok_or(ApiError(503, "unavailable"))?;
-        if !local {
-            let supplied = request
-                .authorization
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .and_then(|value| decode_key(value).ok())
-                .ok_or(ApiError(401, "unauthorized"))?;
-            if !state.admin_verifier().verify(supplied.as_slice()) {
-                return Err(ApiError(401, "unauthorized"));
-            }
-        }
-        if request.body.len() > MAX_REQUEST_BODY {
-            return Err(ApiError(413, "body_too_large"));
+        if supplied.is_some_and(|token| !state.admin_verifier().verify(token.as_slice())) {
+            return Err(ApiError(401, "unauthorized"));
         }
         if request.target == "/api/v1/node-invitations" {
             if request.method != "POST" {

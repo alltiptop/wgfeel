@@ -80,7 +80,7 @@ On Management, generate a fresh invitation for Node A:
 wgfeel node add --traffic entry
 ```
 
-Run the printed `wgfeel join 'wgfeel://join/…'` command as root on Node A.
+Run the printed `wgfeel join --invitation-stdin` command as root on Node A, then paste the invitation at its prompt.
 The output of `node add` lists the main endpoints and the child's assigned UDP
 port. Allow that port on the child. The join command binds it during enrollment,
 saves the verified configuration, then enables and starts `wgfeel.service`.
@@ -130,8 +130,24 @@ Use `wgfeel device show` to reopen details. Record each device's `Address` and
 the `# available at …` hostname from its exported configuration. From one device,
 ping the other device's assigned IPv4 and IPv6 addresses, then its displayed
 `*.feel.internal` hostname. Allow ICMP or a chosen test service in the receiving
-device's own firewall. A client that does not apply the exported `DNS` setting
-needs its resolver configured separately.
+device's own firewall. Configure split DNS on the client: route the domain
+`feel.internal` to the address in the exported `# Split DNS` comment. Keep
+the device's usual resolver for all other names. The portable WireGuard
+profile leaves system DNS selection to the client. Devices without domain-based
+DNS routing can reach their peers by the IP addresses in their profiles.
+
+On Linux with systemd-resolved, run these commands after bringing up the
+tunnel. Substitute the interface name and DNS address from the profile.
+
+```sh
+resolvectl dns <interface> <wgfeel-dns-address>
+resolvectl domain <interface> '~feel.internal'
+resolvectl default-route <interface> no
+```
+
+Use `resolvectl query <device>.feel.internal` and `resolvectl query example.org`
+to check which link answers each query. Use `resolvectl revert <interface>` when
+removing these settings from an interface that remains present.
 
 Only the private network prefixes go through these tunnels; this setup does not
 provide an Internet exit. Users have isolated address spaces: devices belonging

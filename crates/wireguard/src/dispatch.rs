@@ -310,15 +310,12 @@ impl Registry {
         Ok(())
     }
 
-    pub(crate) fn service_snapshot(
+    pub(crate) fn context_snapshot(
         &self,
         lease: &WorkerLease,
     ) -> Result<(Vec<PeerId>, Vec<IndexBinding>), DispatchError> {
         let slot = self.validate_lease(lease)?;
         let context = &self.contexts[slot];
-        if context.id != ContextId::Service {
-            return Err(DispatchError::InvalidConfiguration);
-        }
         let bindings = self
             .indices
             .iter()

@@ -171,6 +171,8 @@ fn populated_with_dns(dns: bool) -> Directory {
     directory
 }
 
+#[path = "support/capacity.rs"]
+mod capacity;
 #[path = "support/dns.rs"]
 mod dns;
 
@@ -179,10 +181,13 @@ struct Runtime {
 }
 impl Runtime {
     fn spawn(path: &Path, listen: &str) -> Self {
+        Self::spawn_binary(env!("CARGO_BIN_EXE_wgfeel").into(), path, listen)
+    }
+    fn spawn_binary(binary: PathBuf, path: &Path, listen: &str) -> Self {
         Self {
             child: ManagedChild::spawn(
                 ProcessSpec::new(
-                    env!("CARGO_BIN_EXE_wgfeel").into(),
+                    binary,
                     vec![
                         "serve".into(),
                         "--control".into(),
@@ -713,7 +718,9 @@ fn management_delivery_enforces_pins_revisions_and_live_policy_before_acknowledg
     .unwrap()
     .project_mesh_for(&node("node"))
     .unwrap();
+    let original_workers = runtime.children();
     apply(address, &changed);
+    assert_eq!(runtime.children(), original_workers);
     // Policy-only delivery preserves existing sessions, including while no
     // Management connection or process exists after the exchange has returned.
     first.send(address, &packet(false, 1, 2, 64, 22));

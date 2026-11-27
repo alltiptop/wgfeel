@@ -166,6 +166,20 @@ impl ManagedChild {
         Ok(managed)
     }
 
+    /// Submit one short line to a CLI and close its input.
+    pub fn write_stdin_line(&mut self, line: &[u8]) -> Result<(), ProcessError> {
+        use std::io::Write;
+        let mut input = self
+            .child
+            .as_mut()
+            .and_then(|child| child.stdin.take())
+            .ok_or(ProcessError::Io)?;
+        input
+            .write_all(line)
+            .and_then(|()| input.write_all(b"\n"))
+            .map_err(|_| ProcessError::Io)
+    }
+
     pub fn id(&self) -> u32 {
         self.pid.as_raw_pid() as u32
     }

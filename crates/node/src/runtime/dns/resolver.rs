@@ -10,15 +10,11 @@ use std::net::IpAddr;
 use wgfeel_core::{Action, DNS_ZONE, DeviceId, Endpoint, GatewayProjection, Network};
 
 pub(super) const MAX_MESSAGE: usize = 16_384;
-pub(super) enum Answer {
-    Local(Message),
-    Forward(Message),
-}
 
 pub(super) fn response(query: &Message, code: ResponseCode) -> Message {
     let mut reply = Message::response(query.metadata.id, query.metadata.op_code);
     reply.metadata.recursion_desired = query.metadata.recursion_desired;
-    reply.metadata.recursion_available = true;
+    reply.metadata.recursion_available = false;
     reply.metadata.response_code = code;
     reply.queries = query.queries.clone();
     if query.edns.is_some() {
@@ -34,7 +30,7 @@ pub(super) fn answer(
     network: &Network,
     source: &DeviceId,
     projection: &GatewayProjection,
-) -> Option<Answer> {
+) -> Option<Message> {
     if bytes.len() > MAX_MESSAGE {
         return None;
     }
@@ -43,37 +39,23 @@ pub(super) fn answer(
         return None;
     }
     if query.metadata.op_code != OpCode::Query {
-        return Some(Answer::Local(response(&query, ResponseCode::NotImp)));
+        return Some(response(&query, ResponseCode::NotImp));
     }
     if query.queries.len() != 1
         || !query.answers.is_empty()
         || !query.authorities.is_empty()
         || query.signature.is_some()
     {
-        return Some(Answer::Local(response(&query, ResponseCode::FormErr)));
+        return Some(response(&query, ResponseCode::FormErr));
     }
     let question = &query.queries[0];
     if question.query_class() != DNSClass::IN {
-        return Some(Answer::Local(response(&query, ResponseCode::Refused)));
+        return Some(response(&query, ResponseCode::Refused));
     }
     let zone = Name::from_ascii(format!("{DNS_ZONE}.")).ok()?;
     // zone_of compares labels, not a string suffix (evilfeel.internal is external).
     if !zone.zone_of(question.name()) {
-        if network.dns_upstreams().is_empty() || !query.metadata.recursion_desired {
-            return Some(Answer::Local(response(&query, ResponseCode::Refused)));
-        }
-        // Forward a fresh query without client-supplied additional records/ECS.
-        let mut forwarded = Message::new(query.metadata.id, MessageType::Query, OpCode::Query);
-        forwarded.metadata.recursion_desired = true;
-        forwarded.metadata.checking_disabled = query.metadata.checking_disabled;
-        forwarded.add_query(question.clone());
-        if let Some(edns) = &query.edns {
-            let mut opt = Edns::new();
-            opt.set_dnssec_ok(edns.flags().dnssec_ok);
-            opt.set_max_payload(edns.max_payload().clamp(512, 1232));
-            forwarded.edns = Some(opt);
-        }
-        return Some(Answer::Forward(forwarded));
+        return Some(response(&query, ResponseCode::Refused));
     }
     let mut reply = response(&query, ResponseCode::NoError);
     reply.metadata.authoritative = true;
@@ -122,7 +104,7 @@ pub(super) fn answer(
             reply.add_authority(soa);
         }
     }
-    Some(Answer::Local(reply))
+    Some(reply)
 }
 
 pub(super) fn encode(reply: &Message, udp_limit: Option<usize>) -> Option<Vec<u8>> {

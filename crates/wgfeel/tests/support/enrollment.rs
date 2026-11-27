@@ -20,18 +20,16 @@ pub(super) fn invitation_mode(fixture: &Fixture, mode: Option<&str>) -> Invitati
         args.extend(["--traffic", mode]);
     }
     let output = fixture.remote(&args, "", true);
-    let command = output
+    assert!(
+        output
+            .lines()
+            .any(|line| line == "wgfeel join --invitation-stdin")
+    );
+    let uri = output
         .lines()
-        .find(|line| line.starts_with("wgfeel join '"))
+        .find(|line| line.starts_with("wgfeel://join/"))
         .unwrap();
-    Invitation::decode(
-        command
-            .strip_prefix("wgfeel join '")
-            .unwrap()
-            .strip_suffix('\'')
-            .unwrap(),
-    )
-    .unwrap()
+    Invitation::decode(uri).unwrap()
 }
 fn exchange(invitation: &Invitation, request: Request<'_>, timeout: Duration) -> Option<Response> {
     let endpoint = invitation.endpoints()[0];

@@ -44,7 +44,7 @@ pub enum Action {
 struct Peer {
     assignment: GatewayAssignment,
     pong: Option<Duration>,
-    nonce: u64,
+    nonce: Option<u64>,
     probe: Duration,
     initiate: Duration,
     next_endpoint: usize,
@@ -92,7 +92,7 @@ impl Mesh {
             .map(|assignment| Peer {
                 assignment: assignment.clone(),
                 pong: None,
-                nonce: 0,
+                nonce: None,
                 probe: Duration::ZERO,
                 initiate: Duration::ZERO,
                 next_endpoint: 0,
@@ -117,6 +117,49 @@ impl Mesh {
             advertise: Duration::ZERO,
             packet: boot,
             assemblies: Vec::with_capacity(MAX_ASSEMBLIES),
+        }
+    }
+    /// Carry authenticated direct reachability across a revision. Topology
+    /// advertisements, relay queues and fragment assemblies belong to one revision.
+    pub fn inherit_health(&mut self, previous: &Self) {
+        if self.own.is_none()
+            || previous.own.is_none()
+            || self.projection.management_id() != previous.projection.management_id()
+            || self.projection.recipient() != previous.projection.recipient()
+            || self.projection.assignment().gateway_public_key()
+                != previous.projection.assignment().gateway_public_key()
+        {
+            return;
+        }
+        self.boot = previous.boot;
+        self.sequence = previous.sequence;
+        self.packet = previous.packet;
+        for peer in &mut self.peers {
+            let Ok(index) = previous.peers.binary_search_by(|old| {
+                old.assignment.recipient().cmp(peer.assignment.recipient())
+            }) else {
+                continue;
+            };
+            let old = &previous.peers[index];
+            if old.assignment.gateway_public_key() != peer.assignment.gateway_public_key() {
+                continue;
+            }
+            let endpoints = peer.assignment.endpoints();
+            let same_endpoints = endpoints == old.assignment.endpoints();
+            if same_endpoints {
+                peer.next_endpoint = old.next_endpoint;
+            }
+            if let Some(endpoint) = old.active_endpoint
+                && let Some(position) = endpoints
+                    .iter()
+                    .position(|candidate| *candidate == endpoint)
+            {
+                peer.active_endpoint = Some(endpoint);
+                peer.pong = old.pong;
+                if !same_endpoints {
+                    peer.next_endpoint = (position + 1) % endpoints.len();
+                }
+            }
         }
     }
     fn live(&self, index: usize, now: Duration) -> bool {
@@ -150,10 +193,10 @@ impl Mesh {
             }
             if now >= peer.probe {
                 self.packet = self.packet.wrapping_add(1);
-                peer.nonce = self.packet;
+                peer.nonce = Some(self.packet);
                 actions.push(Action::Send {
                     node: peer.assignment.recipient().clone(),
-                    packet: encode(self.projection.generation(), 1, &peer.nonce.to_le_bytes()),
+                    packet: encode(self.projection.generation(), 1, &self.packet.to_le_bytes()),
                 });
                 peer.probe = now + Duration::from_secs(1);
             }
@@ -334,7 +377,9 @@ impl Mesh {
         let Some((generation, kind, body)) = decode(packet) else {
             return vec![];
         };
-        if generation != self.projection.generation() {
+        // Ping contains only a nonce. Echo the sender's revision so it can
+        // validate its own probe during a rolling configuration update.
+        if kind != 1 && generation != self.projection.generation() {
             return vec![];
         }
         match kind {
@@ -343,9 +388,10 @@ impl Mesh {
                 packet: encode(generation, 2, body),
             }],
             2 if body.len() == 8 => {
-                if u64::from_le_bytes(body.try_into().expect("eight bytes"))
+                if Some(u64::from_le_bytes(body.try_into().expect("eight bytes")))
                     == self.peers[from].nonce
                 {
+                    self.peers[from].nonce = None;
                     self.peers[from].pong = Some(now);
                     self.peers[from].active_endpoint = Some(endpoint);
                     if let Some(index) = self.peers[from]
@@ -496,7 +542,14 @@ impl Mesh {
             let index = if let Some(index) = self.assemblies.iter().position(|entry| {
                 entry.header.origin == relay.origin && entry.header.id == relay.id
             }) {
-                if self.assemblies[index].header != relay {
+                // TTL belongs to each fragment's path and was checked above.
+                // A different remaining hop count can reach the same assembly.
+                let header = &self.assemblies[index].header;
+                if header.target != relay.target
+                    || header.network != relay.network
+                    || header.traffic != relay.traffic
+                    || header.total != relay.total
+                {
                     return vec![];
                 }
                 index

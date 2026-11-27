@@ -38,7 +38,6 @@ pub enum DomainError {
     DuplicateDeviceAddress,
     InvalidHostname,
     DuplicateHostname,
-    InvalidDnsUpstream,
     UnsupportedSchemaVersion,
     InvalidGeneration,
     GenerationNotIncreasing,

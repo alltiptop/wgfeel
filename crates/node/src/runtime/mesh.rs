@@ -45,6 +45,11 @@ impl Runtime {
             cursor: 0,
         })
     }
+    pub fn replacement(&self, projection: &GatewayProjection) -> Result<Self, &'static str> {
+        let mut next = Self::new(projection)?;
+        next.mesh.inherit_health(&self.mesh);
+        Ok(next)
+    }
     pub fn event(&mut self, event: LocalEvent, now: Duration, gateway: &LocalGateway) {
         let actions = match event {
             LocalEvent::Mesh { peer, packet } => {

@@ -352,7 +352,8 @@ pub(super) fn export(
     } else {
         IpAddr::V6(DNS_IPV6)
     };
-    write!(output, "\nDNS = {dns}\n").map_err(|_| ApiError(500, "encoding_failed"))?;
+    write!(output, "\n# Split DNS: {DNS_ZONE} via {dns}\n")
+        .map_err(|_| ApiError(500, "encoding_failed"))?;
     if let Some(hostname) = selected.registration.hostname() {
         writeln!(output, "# available at {hostname}.{DNS_ZONE}")
             .map_err(|_| ApiError(500, "encoding_failed"))?;

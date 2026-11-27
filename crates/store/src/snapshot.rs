@@ -77,12 +77,15 @@ impl LockedDirectory {
         let Some(mut file) = path::existing(&self.directory, "state.json")? else {
             return Ok(None);
         };
-        if file.metadata()?.len() > maximum as u64 {
+        let length =
+            usize::try_from(file.metadata()?.len()).map_err(|_| StoreError::InvalidState)?;
+        if length > maximum {
             return Err(StoreError::InvalidState);
         }
         // Even a wrong-role load can read Gateway secrets before decoding fails.
         // Allocate once before reading; never grow a secret-bearing allocation.
-        let mut bytes = Zeroizing::new(vec![0u8; maximum + 1]);
+        let capacity = length.checked_add(1).ok_or(StoreError::InvalidState)?;
+        let mut bytes = Zeroizing::new(vec![0u8; capacity]);
         let mut filled = 0;
         while filled < bytes.len() {
             match file.read(&mut bytes[filled..]) {
@@ -92,7 +95,7 @@ impl LockedDirectory {
                 Err(error) => return Err(error.into()),
             }
         }
-        if filled > maximum {
+        if filled != length {
             return Err(StoreError::InvalidState);
         }
         // The unused tail contains only its initial zeros; capacity never changes.

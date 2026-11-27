@@ -243,7 +243,7 @@ fn envelope(document: &str, changed: bool) -> String {
         serde_json::to_string(&wgfeel_store::AdminVerifier::new(&credential(changed)).unwrap())
             .unwrap();
     format!(
-        "{{\"management_storage_version\":5,\"document\":{document},\"service_private_key\":[{key}],\"gateway_private_key\":[212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212],\"admin_verifier\":{verifier}}}"
+        "{{\"management_storage_version\":6,\"document\":{document},\"service_private_key\":[{key}],\"gateway_private_key\":[212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212,212],\"admin_verifier\":{verifier}}}"
     )
 }
 fn populated(path: &Path) -> ManagementStore {
@@ -336,13 +336,13 @@ fn complete_document_and_own_secrets_survive_a_fresh_process_without_public_leak
     assert_snapshot(&loaded, &old(), false);
     let bytes = fs::read(directory.state().join("state.json")).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["management_storage_version"], 5);
+    assert_eq!(json["management_storage_version"], 6);
     assert_eq!(json["document"]["management_version"], 1);
     assert_eq!(json["document"]["management_id"], "management");
     assert_eq!(json.as_object().unwrap().len(), 5);
     assert!(json["service_private_key"] == serde_json::to_value([211; 32]).unwrap());
     assert!(json.get("admin_credential").is_none());
-    assert_eq!(json["admin_verifier"]["algorithm"], "argon2id");
+    assert_eq!(json["admin_verifier"]["algorithm"], "hmac-sha256");
     assert!(json.get("storage_version").is_none());
     assert!(json.get("tenant_private_keys").is_none());
     assert_eq!(
@@ -798,7 +798,7 @@ fn private_envelope_requires_exact_distinct_fields_and_valid_secret_arrays() {
         "\"1\"",
     ] {
         cases.push(valid.replace(
-            "\"management_storage_version\":5",
+            "\"management_storage_version\":6",
             &format!("\"management_storage_version\":{version}"),
         ));
     }

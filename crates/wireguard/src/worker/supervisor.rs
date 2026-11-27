@@ -29,6 +29,7 @@ struct Peer {
     endpoint: Option<SocketAddr>,
 }
 enum Phase {
+    Inherit { old_slot: usize },
     AwaitReady,
     Bootstrap,
     Idle,
@@ -129,6 +130,31 @@ impl WorkerGateway {
         limits: Limits,
         options: WorkerOptions,
     ) -> Result<Self, WorkerError> {
+        Self::prepare(configs, limits, options, None, false)
+    }
+
+    pub(super) fn replacement(
+        &self,
+        configs: Vec<ContextConfig>,
+        retain: bool,
+        main: bool,
+    ) -> Result<Self, WorkerError> {
+        Self::prepare(
+            configs,
+            self.limits,
+            self.options,
+            retain.then_some(self),
+            main,
+        )
+    }
+
+    fn prepare(
+        configs: Vec<ContextConfig>,
+        limits: Limits,
+        options: WorkerOptions,
+        previous: Option<&Self>,
+        main: bool,
+    ) -> Result<Self, WorkerError> {
         validate_options(options)?;
         let public_keys =
             validate_context_configs(&configs, limits).map_err(WorkerError::WireGuard)?;
@@ -158,11 +184,88 @@ impl WorkerGateway {
         };
         for (slot, (config, key)) in configs.into_iter().zip(public_keys).enumerate() {
             let generation = gateway.router.generation(slot);
-            gateway
-                .workers
-                .push(Worker::spawn(config, key, generation, limits, options)?);
+            let retained = previous.and_then(|previous| {
+                previous.workers.iter().enumerate().find(|(_, old)| {
+                    old.context == config.id
+                        && old.public_key == key
+                        && matches!(old.phase, Phase::Idle | Phase::Pending(_))
+                        && ((main && config.id == ContextId::Service)
+                            || (config.peers.len() == old.peers.len()
+                                && config.peers.iter().zip(&old.peers).all(|(new, old)| {
+                                    new.id == old.id && new.public_key == old.public_key
+                                })))
+                })
+            });
+            let worker = if let Some((old_slot, old)) = retained {
+                Worker {
+                    context: config.id,
+                    public_key: key,
+                    peers: Vec::new(),
+                    generation,
+                    pid: old.pid,
+                    process: None,
+                    bootstrap: None,
+                    deadline: None,
+                    next_sequence: 0,
+                    phase: Phase::Inherit { old_slot },
+                }
+            } else {
+                Worker::spawn(config, key, generation, limits, options)?
+            };
+            gateway.workers.push(worker);
         }
         Ok(gateway)
+    }
+    pub(super) fn startup_count(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|worker| matches!(worker.phase, Phase::AwaitReady | Phase::Bootstrap))
+            .count()
+    }
+    /// Copy and validate all live bindings before transferring any process.
+    pub(super) fn prepare_handoff(&mut self, previous: &Self) -> Result<(), WorkerError> {
+        for (slot, worker) in self.workers.iter().enumerate() {
+            if let Phase::Inherit { old_slot } = worker.phase {
+                let old = previous
+                    .workers
+                    .get(old_slot)
+                    .ok_or(WorkerError::NotReady)?;
+                if old.pid != worker.pid
+                    || old.context != worker.context
+                    || old.public_key != worker.public_key
+                    || !matches!(old.phase, Phase::Idle | Phase::Pending(_))
+                {
+                    return Err(WorkerError::NotReady);
+                }
+                self.router
+                    .prepare_routes(slot, &previous.router, old_slot)
+                    .map_err(WorkerError::WireGuard)?;
+            } else {
+                worker.ready()?;
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn take_workers(
+        &mut self,
+        previous: &mut Self,
+    ) -> Result<Vec<(ContextId, u64)>, WorkerError> {
+        let mut inherited = Vec::new();
+        for (slot, worker) in self.workers.iter_mut().enumerate() {
+            if let Phase::Inherit { old_slot } = worker.phase {
+                self.router
+                    .move_admission(slot, &mut previous.router, old_slot)
+                    .map_err(WorkerError::WireGuard)?;
+                std::mem::swap(worker, &mut previous.workers[old_slot]);
+                let generation = self.router.generation(slot);
+                worker.generation = generation;
+                if let Phase::Pending(pending) = &mut worker.phase {
+                    pending.request.generation = generation;
+                }
+                inherited.push((worker.context.clone(), generation));
+            }
+        }
+        Ok(inherited)
     }
     pub fn workers(&self) -> Vec<WorkerInfo> {
         self.workers
@@ -172,7 +275,9 @@ impl WorkerGateway {
                 generation: worker.generation,
                 pid: worker.pid,
                 state: match worker.phase {
-                    Phase::AwaitReady | Phase::Bootstrap => WorkerState::Starting,
+                    Phase::AwaitReady | Phase::Bootstrap | Phase::Inherit { .. } => {
+                        WorkerState::Starting
+                    }
                     Phase::Idle => WorkerState::Ready,
                     Phase::Pending(_) => WorkerState::Busy,
                     Phase::Failed => WorkerState::Failed,
@@ -224,10 +329,34 @@ impl WorkerGateway {
     /// Drives bounded nonblocking I/O in round-robin order. The caller must
     /// keep polling for deadlines and child death to be observed.
     pub fn poll(&mut self) -> Option<WorkerEvent> {
+        // Each confined worker owns the only writer of its stdout. A byte,
+        // EOF or pipe error wakes poll. Fall back to individual inspection on
+        // any event/error, retaining precise process and protocol diagnostics.
+        let idle_quiet = self.workers.len() > 8 && {
+            let mut pipes = Vec::with_capacity(self.workers.len());
+            let complete = self
+                .workers
+                .iter()
+                .filter(|w| matches!(w.phase, Phase::Idle))
+                .all(|w| {
+                    w.process
+                        .as_ref()
+                        .is_some_and(|p| p.append_poll_fds(&mut pipes).is_ok())
+                });
+            complete
+                && matches!(
+                    rustix::event::poll(&mut pipes, Some(&Timespec::default())),
+                    Ok(0)
+                )
+        };
         for _ in 0..self.workers.len() {
             let slot = self.cursor;
             self.cursor = (self.cursor + 1) % self.workers.len();
-            if matches!(self.workers[slot].phase, Phase::Failed) {
+            if matches!(
+                self.workers[slot].phase,
+                Phase::Failed | Phase::Inherit { .. }
+            ) || (idle_quiet && matches!(self.workers[slot].phase, Phase::Idle))
+            {
                 continue;
             }
             match self.poll_one(slot) {
@@ -243,10 +372,31 @@ impl WorkerGateway {
         source: SocketAddr,
         bytes: &[u8],
     ) -> Result<Submission, WorkerError> {
+        self.receive_scoped(source, bytes, None)
+    }
+
+    pub(super) fn receive_mesh(
+        &mut self,
+        source: SocketAddr,
+        bytes: &[u8],
+        context: &ContextId,
+        peer: &PeerId,
+    ) -> Result<Submission, WorkerError> {
+        let (slot, _) = self.select(context, peer)?;
+        self.workers[slot].ready()?;
+        self.receive_scoped(source, bytes, Some((slot, peer)))
+    }
+
+    fn receive_scoped(
+        &mut self,
+        source: SocketAddr,
+        bytes: &[u8],
+        expected: Option<(usize, &PeerId)>,
+    ) -> Result<Submission, WorkerError> {
         validate_endpoint(source).map_err(WorkerError::WireGuard)?;
         let admission = self
             .router
-            .admit(source, bytes)
+            .admit_scoped(source, bytes, expected)
             .map_err(WorkerError::WireGuard)?;
         let slot = admission.slot;
         self.workers[slot].ready()?;
@@ -370,23 +520,6 @@ impl WorkerGateway {
             .collect())
     }
 
-    pub(super) fn inherit_service(&mut self, previous: &mut Self) -> Result<(), WorkerError> {
-        let slot = self.slot(&ContextId::Service)?;
-        let old = previous.slot(&ContextId::Service)?;
-        self.workers[slot].ready()?;
-        previous.workers[old].ready()?;
-        if self.workers[slot].public_key != previous.workers[old].public_key {
-            return Err(WorkerError::InvalidConfiguration);
-        }
-        self.router
-            .inherit_service(&mut previous.router)
-            .map_err(WorkerError::WireGuard)?;
-        std::mem::swap(&mut self.workers[slot], &mut previous.workers[old]);
-        // Idle workers have no outstanding request IDs. Subsequent requests use
-        // the destination registry's lease, retaining the process sequence.
-        self.workers[slot].generation = self.router.generation(slot);
-        Ok(())
-    }
     /// Restart only the identical configured public identity. Desired-state
     /// changes must be accepted through the Management projection boundary.
     pub fn restart(&mut self, config: ContextConfig) -> Result<(), WorkerError> {

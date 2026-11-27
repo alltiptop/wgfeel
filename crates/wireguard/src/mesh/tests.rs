@@ -15,6 +15,9 @@ fn models() -> Vec<Mesh> {
     models_with_transit(wgfeel_core::TrafficMode::Entry)
 }
 fn models_with_transit(mode: wgfeel_core::TrafficMode) -> Vec<Mesh> {
+    models_at_revision(mode, 10)
+}
+fn models_at_revision(mode: wgfeel_core::TrafficMode, generation: u64) -> Vec<Mesh> {
     let networks = ["alice", "bob"]
         .iter()
         .enumerate()
@@ -88,7 +91,7 @@ fn models_with_transit(mode: wgfeel_core::TrafficMode) -> Vec<Mesh> {
         .collect();
     let routing = ManagementConfig::new(
         id("management"),
-        Config::new(10, networks, Policy::new(vec![], vec![], vec![])).unwrap(),
+        Config::new(generation, networks, Policy::new(vec![], vec![], vec![])).unwrap(),
         nodes,
     )
     .unwrap();
@@ -284,7 +287,7 @@ fn mesh_rotates_ip_families_and_sends_data_only_to_the_confirmed_path() {
     assert_eq!(initiation(mesh.tick(Duration::ZERO)), Some(ipv4));
     let now = Duration::from_secs(2);
     assert_eq!(initiation(mesh.tick(now)), Some(ipv6));
-    let nonce = mesh.peers[2].nonce;
+    let nonce = mesh.peers[2].nonce.unwrap();
     mesh.receive(
         &id("c"),
         ipv6,
@@ -328,7 +331,7 @@ fn mesh_rotates_ip_families_and_sends_data_only_to_the_confirmed_path() {
         )
         .is_empty()
     );
-    let nonce = mesh.peers[2].nonce;
+    let nonce = mesh.peers[2].nonce.unwrap();
     mesh.receive(
         &id("c"),
         ipv4,
@@ -545,4 +548,143 @@ fn route_selection_excludes_a_live_transit_outside_the_tenant_scope() {
     models[0].peers[1].assignment = restricted;
     assert_eq!(models[0].route(2, Some(&net("alice")), now), None);
     assert_eq!(models[0].route(2, Some(&net("bob")), now), Some(1));
+}
+
+#[test]
+fn rolling_revision_preserves_direct_probes_and_expires_old_indexed_routes() {
+    let links = [[true; 3]; 3];
+    let mut nodes = models();
+    advance(&mut nodes, &links, 0, 2000);
+    let mut updated = models_at_revision(wgfeel_core::TrafficMode::Entry, 11).remove(0);
+    updated.inherit_health(&nodes[0]);
+    assert_eq!(
+        updated.next_hop(&id("b"), Duration::from_secs(2)),
+        Some(id("b"))
+    );
+    assert!(updated.advertisements.iter().all(Option::is_none));
+    let last_old_advertisement = nodes[1].advertisements[0].as_ref().unwrap().received;
+    nodes[0] = updated;
+    advance(&mut nodes, &links, 2100, 8000);
+    for (index, neighbor) in [(0, "b"), (1, "a")] {
+        assert_eq!(
+            nodes[index].next_hop(&id(neighbor), Duration::from_secs(8)),
+            Some(id(neighbor))
+        );
+    }
+    assert!(nodes[0].advertisements[1].is_none());
+    assert_eq!(
+        nodes[1].advertisements[0].as_ref().unwrap().received,
+        last_old_advertisement
+    );
+}
+
+#[test]
+fn fragments_with_different_remaining_hops_reassemble_only_inside_their_revision() {
+    let mut target = models().remove(2);
+    let mut data = vec![0; MAX_DATAGRAM_SIZE];
+    data[0] = 4;
+    let mut relay = Relay {
+        id: 17,
+        origin: 0,
+        target: 2,
+        network: net("alice"),
+        traffic: Some(Traffic {
+            source: ep("alice", "phone"),
+            destination: ep("alice", "laptop"),
+        }),
+        ttl: 2,
+        total: data.len(),
+    };
+    let now = Duration::from_secs(1);
+    let from = id("b");
+    let addr = "127.0.0.1:10001".parse().unwrap();
+    let first = relay_packet(10, &relay, 0, &data[..CHUNK]);
+    assert!(
+        target
+            .receive(&from, addr, first.as_bytes(), now)
+            .is_empty()
+    );
+    relay.ttl = 1;
+    let last = |generation| relay_packet(generation, &relay, 1, &data[CHUNK..]);
+    assert!(
+        target
+            .receive(&from, addr, last(11).as_bytes(), now)
+            .is_empty()
+    );
+    assert!(
+        matches!(&target.receive(&from, addr, last(10).as_bytes(), now)[..],
+        [Action::Deliver { packet, .. }] if packet.as_bytes() == data)
+    );
+}
+
+#[test]
+fn revision_preserves_the_next_probe_after_a_failed_secondary_endpoint() {
+    let mut old = models().remove(0);
+    let mut new = models_at_revision(wgfeel_core::TrafficMode::Entry, 11).remove(0);
+    let active = old.peers[1].assignment.endpoints()[0];
+    let second = "[2001:db8::2]:10001".parse().unwrap();
+    let third = "192.0.2.3:10001".parse().unwrap();
+    for mesh in [&mut old, &mut new] {
+        mesh.peers[1].assignment = mesh.peers[1]
+            .assignment
+            .clone()
+            .with_endpoints(vec![active, second, third])
+            .unwrap();
+    }
+    let neighbor = id("b");
+    let probe = |mesh: &mut Mesh, now| {
+        mesh.tick(now).into_iter().find_map(|action| match action {
+            Action::Initiate { node, endpoint } if node == neighbor => Some(endpoint),
+            _ => None,
+        })
+    };
+    assert_eq!(probe(&mut old, Duration::ZERO), Some(active));
+    let nonce = old.peers[1].nonce.unwrap();
+    old.receive(
+        &neighbor,
+        active,
+        encode(10, 2, &nonce.to_le_bytes()).as_bytes(),
+        Duration::ZERO,
+    );
+    assert_eq!(probe(&mut old, DEAD), Some(second));
+    new.inherit_health(&old);
+    assert_eq!(probe(&mut new, DEAD + Duration::from_secs(2)), Some(third));
+}
+
+#[test]
+fn inherit_health_preserves_active_endpoint_when_secondary_endpoints_change() {
+    let links = [[true; 3]; 3];
+    let mut nodes = models();
+    advance(&mut nodes, &links, 0, 2000);
+    let old_mesh = nodes[0].projection.mesh().to_vec();
+    let active = nodes[0].peers[1].active_endpoint.unwrap();
+    let secondary: SocketAddr = "[2001:db8::2]:10001".parse().unwrap();
+    let updated_nodes: Vec<_> = old_mesh
+        .into_iter()
+        .map(|node| {
+            if node.recipient() == &id("b") {
+                node.with_endpoints(vec![secondary, active]).unwrap()
+            } else {
+                node
+            }
+        })
+        .collect();
+    let projection = ManagementConfig::new(
+        id("management"),
+        Config::new(
+            11,
+            nodes[0].projection.config().networks().to_vec(),
+            Policy::new(vec![], vec![], vec![]),
+        )
+        .unwrap(),
+        updated_nodes,
+    )
+    .unwrap()
+    .project_mesh_for(&id("a"))
+    .unwrap();
+    let mut updated = Mesh::new(&projection, 99);
+    updated.inherit_health(&nodes[0]);
+    assert_eq!(updated.peers[1].active_endpoint, Some(active));
+    assert!(updated.peers[1].pong.is_some());
+    assert_eq!(updated.peers[1].next_endpoint, 0);
 }

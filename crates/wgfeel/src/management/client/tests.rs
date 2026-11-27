@@ -102,14 +102,16 @@ fn node_add_without_arguments_prints_one_join_command_without_changing_membershi
     let install = Installation::new();
     let snapshot = fs::read(install.path.join("instance/state/state.json")).unwrap();
     let output = install.ui(&["node", "add"], "").unwrap();
-    let command = output
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("wgfeel join"))
+            .collect::<Vec<_>>(),
+        ["wgfeel join --invitation-stdin"]
+    );
+    let uri = output
         .lines()
-        .find(|line| line.starts_with("wgfeel join '"))
-        .unwrap();
-    let uri = command
-        .strip_prefix("wgfeel join '")
-        .unwrap()
-        .strip_suffix('\'')
+        .find(|line| line.starts_with("wgfeel://join/"))
         .unwrap();
     let invitation = wgfeel_protocol::enrollment::Invitation::decode(uri).unwrap();
     assert_eq!(

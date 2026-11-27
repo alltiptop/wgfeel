@@ -144,7 +144,7 @@ impl Client {
     }
 }
 
-fn projection(alpha: &str, policy: Policy, local: &[&str]) -> GatewayProjection {
+fn projection(generation: u64, alpha: &str, policy: Policy, local: &[&str]) -> GatewayProjection {
     let specs = [
         (alpha, 1, 1),
         ("beta", 2, 2),
@@ -185,7 +185,7 @@ fn projection(alpha: &str, policy: Policy, local: &[&str]) -> GatewayProjection 
     .unwrap();
     ManagementConfig::new(
         node("management"),
-        Config::new(41, networks, policy).unwrap(),
+        Config::new(generation, networks, policy).unwrap(),
         vec![assignment],
     )
     .unwrap()
@@ -224,7 +224,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(policy: Policy, local: &[&str]) -> Self {
-        let projection = projection("alpha", policy, local);
+        let projection = projection(41, "alpha", policy, local);
         let material = keys("alpha", local);
         let gateway = build(
             &projection,
@@ -433,6 +433,7 @@ fn udp(ipv6: bool, source: &str, destination: &str, hops: u8, marker: u8) -> Vec
 
 fn projection_pins_and_exact_local_keys_are_required_before_workers_start() {
     let projection = projection(
+        41,
         "alpha",
         Policy::new(vec![], both("alpha"), vec![]),
         &["alpha"],
@@ -801,13 +802,92 @@ fn wait_egress_busy(fixture: &mut Fixture) {
         if let Some(event) = fixture.gateway.poll() {
             assert!(
                 matches!(event, LocalEvent::Ready { .. }),
-                "egress completed while destination was stopped: {event:?}"
+                "unexpected event while waiting for the destination worker: {event:?}"
             );
         }
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+fn handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives() {
+    let local = ["alpha", "beta"];
+    let old_policy = Policy::new(
+        vec![],
+        vec![],
+        vec![cross("alpha", "first", "beta", "first")],
+    );
+    let new_policy = Policy::new(vec![], vec![allow("alpha", "first", "second")], vec![]);
+    let material = keys("alpha", &local);
+    let tenants = || material.iter().map(|(net, key)| (net, key));
+    let node_key = wgfeel_test_support::fixture_node_keys(seed(9));
+    let pin = public(10);
+    let gateway = LocalGateway::spawn_managed(
+        &projection(41, "alpha", old_policy, &local),
+        &pin,
+        &node_key,
+        tenants(),
+        Limits {
+            handshake_limit_per_ip: 100,
+        },
+        options(),
+    )
+    .unwrap();
+    let mut fixture = Fixture {
+        gateway,
+        clients: vec![
+            Client::new("alpha", "first", 23, 1),
+            Client::new("alpha", "second", 24, 1),
+            Client::new("beta", "first", 25, 2),
+        ],
+    };
+    fixture.ready();
+    // Give the source worker a different generation from the fresh replacement router.
+    let (source_network, source_key) = &material[0];
+    fixture
+        .gateway
+        .restart_tenant(source_network, source_key)
+        .unwrap();
+    fixture.ready();
+    for index in 0..fixture.clients.len() {
+        fixture.establish(index);
+    }
+    let mut next = fixture
+        .gateway
+        .prepare_replacement(
+            &projection(42, "alpha", new_policy, &local),
+            &pin,
+            &node_key,
+            tenants(),
+        )
+        .unwrap();
+    assert_eq!(next.starting_workers(), 0);
+    fixture.submit(0, &udp(false, "10.1.0.1", "10.2.0.1", 64, 1));
+    wait_egress_busy(&mut fixture);
+    let packet = udp(false, "10.1.0.1", "10.1.0.2", 64, 2);
+    fixture.submit(0, &packet);
+    next.handoff(&mut fixture.gateway)
+        .unwrap()
+        .activate()
+        .unwrap();
+
+    let events = [fixture.event(), fixture.event()];
+    assert!(events.iter().any(|event| matches!(event,
+        LocalEvent::Dropped { context: origin, peer: Some(source), reason: LocalError::Cancelled }
+            if origin == &context("alpha") && source == &peer("first")
+    )));
+    let output = events
+        .into_iter()
+        .find_map(|event| match event {
+            LocalEvent::Network(output) => Some(output),
+            _ => None,
+        })
+        .expect("pending receive must be forwarded under the new ACL");
+    let destination = &mut fixture.clients[1];
+    let encrypted = encrypted(output, destination);
+    destination.assert_plaintext(server(), &encrypted, &decrement(&packet));
+}
+
 fn busy_destination_drops_without_replay_and_other_tenant_keeps_progressing() {
     let mut fixture = cross_fixture();
     let pause = PausedChild::new(worker_pid(&fixture, "beta"));
@@ -1036,7 +1116,7 @@ fn hostile_own_context_plaintext_cannot_bypass_parent_source_policy_or_packet_ch
         } else {
             vec![]
         };
-        let projection = projection(name, Policy::new(global, both(name), vec![]), &[name]);
+        let projection = projection(41, name, Policy::new(global, both(name), vec![]), &[name]);
         let material = keys(name, &[name]);
         let gateway = build(
             &projection,
@@ -1110,6 +1190,10 @@ fn main() -> ExitCode {
         (
             "actual_udp_denies_global_rule_and_spoof_then_delivers_permitted_reverse_flow",
             actual_udp_denies_global_rule_and_spoof_then_delivers_permitted_reverse_flow,
+        ),
+        (
+            "handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives",
+            handoff_cancels_pending_forwarding_and_applies_new_policy_to_pending_receives,
         ),
         (
             "busy_destination_drops_without_replay_and_other_tenant_keeps_progressing",

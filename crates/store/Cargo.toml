@@ -8,7 +8,6 @@ license.workspace = true
 
 [dependencies]
 aws-lc-rs.workspace = true
-argon2.workspace = true
 wgfeel-core.workspace = true
 rustix.workspace = true
 serde.workspace = true

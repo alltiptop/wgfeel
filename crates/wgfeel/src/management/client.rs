@@ -404,11 +404,9 @@ fn run_with_io(
         .map_err(|_| "cannot print invitation")?;
         writeln!(out, "Child WireGuard UDP port: {}", parsed.mesh_port())
             .map_err(|_| "cannot print invitation")?;
-        // decode accepts only the URL-safe alphabet, so the quoted argument
-        // cannot contain shell substitutions or terminate its single quotes.
         return writeln!(
             out,
-            "Traffic capability: {}\nRun on the node (one use, valid for 15 minutes):\n\nwgfeel join '{}'",
+            "Traffic capability: {}\nRun on the node (one use, valid for 15 minutes):\n\nwgfeel join --invitation-stdin\n\nPaste this invitation when prompted:\n{}",
             match issued.traffic { wgfeel_core::TrafficMode::Entry => "entry", wgfeel_core::TrafficMode::Relay => "relay", wgfeel_core::TrafficMode::Off => "off" }, issued.invitation
         )
         .map_err(|_| "cannot print invitation; create a new invitation");

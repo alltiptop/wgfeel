@@ -303,7 +303,7 @@ fn commits_use_hashed_auth_and_explicit_api_configuration_preserves_complete_mat
         .unwrap();
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap()).unwrap();
-    assert_eq!(json["management_storage_version"], 5);
+    assert_eq!(json["management_storage_version"], 6);
     assert!(json.get("api").is_none());
     store
         .commit_with_api(
@@ -322,7 +322,7 @@ fn commits_use_hashed_auth_and_explicit_api_configuration_preserves_complete_mat
     );
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap()).unwrap();
-    assert_eq!(json["management_storage_version"], 5);
+    assert_eq!(json["management_storage_version"], 6);
     assert_eq!(
         json["api"],
         serde_json::json!({"listen":"0.0.0.0:51820","admin_public_key":vec![181;32]})
@@ -466,7 +466,7 @@ fn all_six_changes_and_credential_rotation_preserve_settings_without_public_proj
         let json: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.state().join("state.json")).unwrap())
                 .unwrap();
-        assert_eq!(json["management_storage_version"], 5);
+        assert_eq!(json["management_storage_version"], 6);
         let public = candidate.to_json().unwrap();
         assert!(!public.contains("\"api\""));
         assert!(!public.contains("admin_public_key"));
@@ -519,7 +519,7 @@ fn all_six_changes_and_credential_rotation_preserve_settings_without_public_proj
 const LITERAL_DOCUMENT: &str = r#"{"management_version":1,"management_id":"management","config":{"schema_version":1,"generation":3,"networks":[],"policy":{"global_rules":[],"local_rules":[],"grants":[]}},"assignments":[],"clients":[]}"#;
 fn literal() -> String {
     format!(
-        "{{\"management_storage_version\":5,\"document\":{LITERAL_DOCUMENT},\"gateway_private_key\":[99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99],\"service_private_key\":{},\"admin_verifier\":{},\"api\":{{\"listen\":\"0.0.0.0:51820\",\"admin_public_key\":{}}}}}",
+        "{{\"management_storage_version\":6,\"document\":{LITERAL_DOCUMENT},\"gateway_private_key\":[99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99],\"service_private_key\":{},\"admin_verifier\":{},\"api\":{{\"listen\":\"0.0.0.0:51820\",\"admin_public_key\":{}}}}}",
         serde_json::to_string(&vec![197; 32]).unwrap(),
         serde_json::to_string(&wgfeel_store::AdminVerifier::new(&credential(false)).unwrap())
             .unwrap(),
@@ -533,7 +533,7 @@ fn explicit_api_settings_reject_ambiguous_fields_and_invalid_addresses() {
     let parsed: serde_json::Value = serde_json::from_str(&valid).unwrap();
     let mut cases = vec![
         valid.replace(
-            "\"management_storage_version\":5",
+            "\"management_storage_version\":6",
             "\"management_storage_version\":99",
         ),
         valid.replace("\"listen\":", "\"listen\":\"0.0.0.0:51820\",\"listen\":"),

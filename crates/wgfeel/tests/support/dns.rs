@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 
 fn query(name: &str, ipv6: bool) -> Vec<u8> {
     let mut message = Message::new(121, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
     message.add_query(Query::query(
         Name::from_ascii(name).unwrap(),
         if ipv6 {
@@ -111,6 +112,9 @@ fn encrypted_dns_is_tenant_scoped_source_bound_and_survives_restart_without_mana
                     RData::A(A(format!("10.1.0.{host}").parse().unwrap()))
                 };
                 assert_eq!(reply.answers[0].data, expected);
+                let external = udp_answer(peer, address, "example.org.", ipv6);
+                assert_eq!(external.metadata.response_code, ResponseCode::Refused);
+                assert!(!external.metadata.recursion_available);
             }
         }
         // Alice's ACL denies her second device. Bob's second device is visible only in Bob's context.
@@ -376,7 +380,7 @@ fn encrypted_dns_tcp_stream_handles_split_frames_and_repeated_queries_over_both_
         let mut replies = Vec::new();
         let mut received = Vec::new();
         let start = Instant::now();
-        while replies.len() < 2 && start.elapsed() < WAIT {
+        while replies.len() < 3 && start.elapsed() < WAIT {
             let time = IpInstant::from_micros(start.elapsed().as_micros() as i64);
             interface.poll_maintenance(time);
             interface.poll_ingress_single(time, &mut link, &mut sockets);
@@ -399,6 +403,14 @@ fn encrypted_dns_tcp_stream_handles_split_frames_and_repeated_queries_over_both_
                 if received.len() >= len + 2 {
                     replies.push(Message::from_vec(&received[2..len + 2]).unwrap());
                     received.drain(..len + 2);
+                    let name = if replies.len() == 1 {
+                        "example.org."
+                    } else {
+                        "pc.feel.internal."
+                    };
+                    let body = query(name, ipv6);
+                    request = (body.len() as u16).to_be_bytes().to_vec();
+                    request.extend(body);
                     sent = 0;
                 }
             }
@@ -420,7 +432,10 @@ fn encrypted_dns_tcp_stream_handles_split_frames_and_repeated_queries_over_both_
             }
             std::thread::sleep(Duration::from_millis(3));
         }
-        assert_eq!(replies.len(), 2, "TCP DNS must answer twice, ipv6={ipv6}");
+        assert_eq!(replies.len(), 3, "three framed replies, ipv6={ipv6}");
+        let external = replies.remove(1);
+        assert_eq!(external.metadata.response_code, ResponseCode::Refused);
+        assert!(!external.metadata.recursion_available);
         for reply in replies {
             assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
             assert_eq!(reply.answers.len(), 1);

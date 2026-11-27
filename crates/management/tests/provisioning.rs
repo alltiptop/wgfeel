@@ -138,7 +138,8 @@ fn private_lan_provisioning_exports_persistent_native_configs_without_leaking_de
     assert!(text.contains("[Interface]\nPrivateKey = "));
     assert!(text.contains("Endpoint = 192.0.2.1:51820"));
     assert!(text.contains("Address = 10.203.0.2/32, fd77:77::2/128\n"));
-    assert!(text.contains("DNS = 10.203.0.1\n"));
+    assert!(text.contains("# Split DNS: feel.internal via 10.203.0.1\n"));
+    assert!(!text.lines().any(|line| line.starts_with("DNS =")));
     assert!(text.contains(&format!("# User: Alice ({alice})\n")));
     assert!(text.contains(&format!("# Device: phone ({})\n", devices[0])));
     assert!(text.contains("# available at phone.feel.internal\n"));

@@ -337,6 +337,16 @@ fn applied(fixture: &Fixture, generation: u64, children: &mut Vec<ManagedChild>)
 
 #[test]
 fn main_entry_applies_its_own_configuration_and_serves_native_clients_on_its_udp_port() {
+    main_entry(false);
+}
+
+#[test]
+#[ignore = "release timing of one administrative request alongside established WireGuard traffic"]
+fn forwarding_latency_during_bearer_verification() {
+    main_entry(true);
+}
+
+fn main_entry(measure_auth: bool) {
     let fixture = Fixture::new();
     let reserve = UdpSocket::bind("127.0.0.1:0").unwrap();
     let endpoint = reserve.local_addr().unwrap();
@@ -377,20 +387,23 @@ fn main_entry_applies_its_own_configuration_and_serves_native_clients_on_its_udp
             serde_json::json!({"name":name}),
         );
     }
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = api::json(&fixture.state(), "GET", "/api/v1/distribution", Value::Null);
-        let nodes = status["gateways"].as_array().unwrap();
-        assert_eq!(nodes.len(), 1);
-        if status["generation"] == 4 && nodes[0]["status"] == "applied" {
-            break;
+    let wait_for_main = |generation: u64| {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = api::json(&fixture.state(), "GET", "/api/v1/distribution", Value::Null);
+            let nodes = status["gateways"].as_array().unwrap();
+            assert_eq!(nodes.len(), 1);
+            if status["generation"] == generation && nodes[0]["status"] == "applied" {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "main did not apply its local forwarding revision"
+            );
+            thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            Instant::now() < until,
-            "main did not apply its local forwarding revision"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    };
+    wait_for_main(4);
     let phone = exported(&fixture, "alice", "phone");
     let laptop = exported(&fixture, "alice", "laptop");
     let mut clients = [Client::from_config(&phone), Client::from_config(&laptop)];
@@ -400,8 +413,64 @@ fn main_entry_applies_its_own_configuration_and_serves_native_clients_on_its_udp
     }
     exchange_with_limits(&mut clients, 0, 1, 71, 1, Duration::from_secs(5));
     exchange_with_limits(&mut clients, 1, 0, 72, 1, Duration::from_secs(5));
+    if measure_auth {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let token = format!("Bearer {}", STANDARD.encode([9; 32]));
+        for (index, header) in ["Bearer invalid", token.as_str()]
+            .iter()
+            .cycle()
+            .take(6)
+            .enumerate()
+        {
+            let mut stream = UnixStream::connect(fixture.state().join("api.sock")).unwrap();
+            stream.set_read_timeout(Some(WAIT)).unwrap();
+            let request = wgfeel_protocol::http::encode_request(wgfeel_protocol::Request {
+                method: "GET",
+                target: "/api/v1/users",
+                authorization: Some(header),
+                if_match: None,
+                body: b"",
+            })
+            .unwrap();
+            stream.write_all(&request).unwrap();
+            thread::sleep(Duration::from_millis(2));
+            let begin = Instant::now();
+            exchange_with_limits(&mut clients, 0, 1, 80 + index as u8, 1, WAIT);
+            let micros = begin.elapsed().as_micros();
+            let mut bytes = vec![];
+            stream.read_to_end(&mut bytes).unwrap();
+            assert_eq!(
+                wgfeel_protocol::http::decode_response(&bytes)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                401
+            );
+            eprintln!(
+                "valid_bearer_encoding={} forwarding_us={micros}",
+                index % 2 == 1
+            );
+        }
+    }
+    let bob = api::json(
+        &fixture.state(),
+        "POST",
+        "/api/v1/users",
+        serde_json::json!({"name":"bob"}),
+    );
+    let bob = bob["id"].as_str().unwrap();
+    api::json(
+        &fixture.state(),
+        "POST",
+        &format!("/api/v1/users/{bob}/devices"),
+        serde_json::json!({"name":"desk"}),
+    );
+    wait_for_main(6);
+    exchange_with_limits(&mut clients, 0, 1, 74, 1, Duration::from_secs(5));
     server.terminate().unwrap();
-    server = fixture.start(4);
+    server = fixture.start(6);
     for client in &mut clients {
         client.establish();
     }
