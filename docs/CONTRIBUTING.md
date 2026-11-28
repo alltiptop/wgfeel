@@ -5,6 +5,8 @@ security-sensitive work, follow the [security policy](SECURITY.md).
 
 ## Development rules
 
+- Use English for all project text, including commit messages, code comments,
+  documentation, and user-facing messages.
 - **Self-contained commits**: every commit must build and pass the full check
   suite on its own, without relying on later commits.
 - **Text-only repository**: never store binaries, archives, dumps, opaque blobs
