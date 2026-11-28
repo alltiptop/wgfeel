@@ -1,27 +1,33 @@
 use super::*;
 use hickory_proto::{
     op::{MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RData, RecordType, rdata::A},
+    rr::{
+        Name, RData, RecordType,
+        rdata::{A, AAAA},
+    },
 };
 use wgfeel_core::*;
 
 fn projection() -> GatewayProjection {
-    let networks: Vec<_> = [("alice", "10.203.0.2"), ("bob", "10.203.0.3")]
-        .into_iter()
-        .map(|(id, ip)| {
-            let device = Device::new(
-                DeviceId::new("pc").unwrap(),
-                DevicePublicKey::new([id.len() as u8; 32]).unwrap(),
-                vec![ip.parse().unwrap(), "fd77:77::2".parse().unwrap()],
-            )
+    let networks: Vec<_> = [
+        ("alice", "10.203.0.2", "fd77:77::2"),
+        ("bob", "10.203.0.3", "fd77:77::3"),
+    ]
+    .into_iter()
+    .map(|(id, ipv4, ipv6)| {
+        let device = Device::new(
+            DeviceId::new("pc").unwrap(),
+            DevicePublicKey::new([id.len() as u8; 32]).unwrap(),
+            vec![ipv4.parse().unwrap(), ipv6.parse().unwrap()],
+        )
+        .unwrap()
+        .with_hostname(Some("pc".into()))
+        .unwrap();
+        Network::new(NetworkId::new(id).unwrap(), vec![device])
             .unwrap()
-            .with_hostname(Some("pc".into()))
-            .unwrap();
-            Network::new(NetworkId::new(id).unwrap(), vec![device])
-                .unwrap()
-                .with_private_lan(true)
-        })
-        .collect();
+            .with_private_lan(true)
+    })
+    .collect();
     let assignments = vec![
         GatewayAssignment::new(
             NodeId::new("node").unwrap(),
@@ -59,8 +65,16 @@ fn query(name: &str, kind: RecordType) -> Message {
 #[test]
 fn independent_answers_and_local_negative_results() {
     let projection = projection();
-    for (index, expected) in [(0, "10.203.0.2"), (1, "10.203.0.3")] {
-        let network = &projection.config().networks()[index];
+    for (tenant, ipv4, ipv6) in [
+        ("alice", "10.203.0.2", "fd77:77::2"),
+        ("bob", "10.203.0.3", "fd77:77::3"),
+    ] {
+        let network = projection
+            .config()
+            .networks()
+            .iter()
+            .find(|network| network.id().as_str() == tenant)
+            .unwrap();
         let answer = |name, kind| {
             resolver::answer(
                 &query(name, kind).to_vec().unwrap(),
@@ -71,15 +85,18 @@ fn independent_answers_and_local_negative_results() {
             .unwrap()
         };
         let reply = answer("PC.Feel.Internal.", RecordType::A);
-        assert_eq!(
-            reply.answers[0].data,
-            RData::A(A(expected.parse().unwrap()))
-        );
+        assert_eq!(reply.answers.len(), 1);
+        assert_eq!(reply.answers[0].data, RData::A(A(ipv4.parse().unwrap())));
         assert!(reply.metadata.authoritative);
         let reply = answer("pc.feel.internal.", RecordType::AAAA);
-        assert_eq!(reply.answers[0].data.to_string(), "fd77:77::2");
+        assert_eq!(reply.answers.len(), 1);
+        assert_eq!(
+            reply.answers[0].data,
+            RData::AAAA(AAAA(ipv6.parse().unwrap()))
+        );
         let reply = answer("missing.feel.internal.", RecordType::A);
         assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
+        assert!(reply.answers.is_empty());
         assert_eq!(reply.authorities.len(), 1);
         let reply = answer("pc.feel.internal.", RecordType::TXT);
         assert_eq!(reply.metadata.response_code, ResponseCode::NoError);

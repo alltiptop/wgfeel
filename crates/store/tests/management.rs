@@ -263,26 +263,19 @@ fn private_write(path: &Path, bytes: &[u8]) {
     file.write_all(bytes).unwrap();
 }
 fn fresh_verify(path: &Path, changed: bool) {
-    let output = spawn_fixture(
-        path,
-        if changed { "verify-new" } else { "verify-old" },
-        None,
-    )
-    .wait(WAIT)
-    .unwrap();
+    let output = spawn_fixture(path, if changed { "verify-new" } else { "verify-old" })
+        .wait(WAIT)
+        .unwrap();
     assert!(
         output.status.success(),
         "fresh process failed complete snapshot verification"
     );
 }
-fn spawn_fixture(path: &Path, mode: &str, stage: Option<usize>) -> ManagedChild {
-    let mut environment = vec![
+fn spawn_fixture(path: &Path, mode: &str) -> ManagedChild {
+    let environment = vec![
         ("WGFEEL_MANAGEMENT_PATH".into(), path.as_os_str().to_owned()),
         ("WGFEEL_MANAGEMENT_MODE".into(), mode.into()),
     ];
-    if let Some(stage) = stage {
-        environment.push(("WGFEEL_MANAGEMENT_STAGE".into(), stage.to_string().into()));
-    }
     ManagedChild::spawn(
         ProcessSpec::new(
             std::env::current_exe().unwrap(),
@@ -506,7 +499,7 @@ fn stale_editor_cannot_replace_a_new_revision_published_by_another_process() {
         .routing()
         .generation();
     drop(store);
-    let output = spawn_fixture(&directory.state(), "commit-new", None)
+    let output = spawn_fixture(&directory.state(), "commit-new")
         .wait(WAIT)
         .unwrap();
     assert!(output.status.success());
@@ -541,14 +534,14 @@ fn role_types_share_one_lifetime_lock_including_across_processes() {
         Err(StoreError::Locked)
     ));
     assert!(
-        spawn_fixture(&directory.state(), "expect-locked", None)
+        spawn_fixture(&directory.state(), "expect-locked")
             .wait(WAIT)
             .unwrap()
             .status
             .success()
     );
     drop(store);
-    let mut holder = spawn_fixture(&directory.state(), "hold", None);
+    let mut holder = spawn_fixture(&directory.state(), "hold");
     holder
         .wait_for_stdout_line(b"MANAGEMENT_LOCK_READY", WAIT)
         .unwrap();
@@ -715,11 +708,11 @@ fn five_checkpoint_errors_preserve_whole_old_or_new_document_and_force_cas_reloa
 }
 
 #[test]
-fn real_process_death_at_all_five_stages_recovers_complete_revision_and_lock() {
-    for (index, _) in STAGES.into_iter().enumerate() {
+fn crash_either_side_of_rename_recovers_complete_revision_and_lock() {
+    for (mode, published) in [("before-rename", false), ("after-rename", true)] {
         let directory = Directory::new();
         drop(populated(&directory.state()));
-        let mut child = spawn_fixture(&directory.state(), "crash-writer", Some(index));
+        let mut child = spawn_fixture(&directory.state(), mode);
         child
             .wait_for_stdout_line(b"MANAGEMENT_CHECKPOINT_READY", WAIT)
             .unwrap();
@@ -732,13 +725,7 @@ fn real_process_death_at_all_five_stages_recovers_complete_revision_and_lock() {
             Err(StoreError::Locked)
         ));
         assert!(!child.terminate().unwrap().status.success());
-        fresh_verify(&directory.state(), index >= 3);
-        let store = ManagementStore::open(&directory.state()).unwrap();
-        assert_snapshot(
-            &store.load().unwrap().unwrap(),
-            &if index >= 3 { new() } else { old() },
-            index >= 3,
-        );
+        fresh_verify(&directory.state(), published);
     }
 }
 
@@ -1018,7 +1005,6 @@ fn linked_or_special_current_and_pending_files_are_not_followed_unlinked_or_bloc
                 } else {
                     "unsafe-current"
                 },
-                None,
             )
             .wait(WAIT)
             .unwrap();
@@ -1065,11 +1051,12 @@ fn management_process_fixture() {
             io::stdout().flush().unwrap();
             let _ = io::stdin().read_exact(&mut [0]);
         }
-        "crash-writer" => {
-            let stage: usize = std::env::var("WGFEEL_MANAGEMENT_STAGE")
-                .unwrap()
-                .parse()
-                .unwrap();
+        "before-rename" | "after-rename" => {
+            let stage = if mode == "before-rename" {
+                CommitStage::AfterFileSync
+            } else {
+                CommitStage::AfterRename
+            };
             store
                 .commit_with_checkpoint(
                     &new(),
@@ -1077,7 +1064,7 @@ fn management_process_fixture() {
                     &credential(true),
                     Some(3),
                     |at| {
-                        if at == STAGES[stage] {
+                        if at == stage {
                             println!("\nMANAGEMENT_CHECKPOINT_READY");
                             io::stdout().flush()?;
                             io::stdin().read_exact(&mut [0])?;

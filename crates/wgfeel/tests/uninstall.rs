@@ -79,13 +79,14 @@ impl Fixture {
     fn write_receipt(&self, value: &serde_json::Value) {
         fs::write(self.receipt(), serde_json::to_vec(value).unwrap()).unwrap();
     }
-    fn run(&self, extra: &[&str]) -> CapturedOutput {
-        let mut args = vec![
-            "uninstall".into(),
-            "--install-dir".into(),
-            self.install.as_os_str().to_owned(),
-        ];
+    fn args(&self, extra: &[&str]) -> Vec<OsString> {
+        let mut args = vec!["--install-dir".into(), self.install.as_os_str().to_owned()];
         args.extend(extra.iter().map(OsString::from));
+        args
+    }
+    fn run(&self, extra: &[&str]) -> CapturedOutput {
+        let mut args = vec!["uninstall".into()];
+        args.extend(self.args(extra));
         command(args)
     }
     fn assert_data(&self) {
@@ -214,35 +215,25 @@ fn confirmed_purge_removes_only_known_data_and_repeat_succeeds() {
 }
 
 #[test]
-fn nonterminal_confirmation_and_strict_flags_fail_without_mutation() {
+fn nonterminal_purge_requires_valid_confirmation_without_mutation() {
     let fixture = Fixture::new("child");
-    for flags in [
-        vec!["--purge"],
-        vec!["--purge", "--confirm", "other"],
-        vec!["--confirm", "wgfeel"],
-        vec!["--purge", "--confirm"],
-        vec!["--purge", "--purge", "--confirm", "wgfeel"],
-        vec!["--dry-run", "--dry-run"],
-        vec!["--install-dir", "/tmp"],
-        vec!["--unknown"],
-        vec!["extra"],
-        vec!["--purge", "--confirm", "wgfeel", "--confirm", "wgfeel"],
-    ] {
-        rejected(fixture.run(&flags));
+    for flags in [&["--purge"][..], &["--purge", "--confirm", "other"]] {
+        rejected(fixture.run(flags));
         fixture.assert_data();
     }
-    rejected(command(
-        ["uninstall", "--install-dir", "relative"]
-            .map(OsString::from)
-            .to_vec(),
-    ));
 }
 
 #[test]
 fn missing_or_invalid_receipt_never_assumes_installation_ownership() {
-    let mut cases = vec![b"not JSON NEVER_PRINT_RECEIPT_SECRET".to_vec()];
     let fixture = Fixture::new("main");
+    let malformed = b"not JSON NEVER_PRINT_RECEIPT_SECRET";
+    fs::write(fixture.receipt(), malformed).unwrap();
+    rejected(fixture.run(&["--purge", "--confirm", "wgfeel"]));
+    fixture.assert_data();
+    assert_eq!(fs::read(fixture.receipt()).unwrap(), malformed);
+
     let valid = fixture.receipt_value();
+    let mut cases = Vec::new();
     for field in [
         "version",
         "resources",
@@ -273,10 +264,17 @@ fn missing_or_invalid_receipt_never_assumes_installation_ownership() {
     cases.push(vec![0xff, 0xfe]);
     for bytes in cases {
         fs::write(fixture.receipt(), &bytes).unwrap();
-        rejected(fixture.run(&["--purge", "--confirm", "wgfeel", "--dry-run"]));
-        fixture.assert_data();
+        let error = wgfeel_host::uninstall::run(&fixture.args(&[
+            "--purge",
+            "--confirm",
+            "wgfeel",
+            "--dry-run",
+        ]))
+        .unwrap_err();
+        assert!(!error.contains("NEVER_PRINT"));
         assert_eq!(fs::read(fixture.receipt()).unwrap(), bytes);
     }
+    fixture.assert_data();
     fs::remove_file(fixture.receipt()).unwrap();
     rejected(fixture.run(&["--purge", "--confirm", "wgfeel"]));
     fixture.assert_data();

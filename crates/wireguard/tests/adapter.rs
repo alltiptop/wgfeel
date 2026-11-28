@@ -1169,54 +1169,7 @@ fn authenticated_mac_sources_are_bounded_even_when_handshake_authentication_fail
 }
 
 #[test]
-fn distinct_handshake_source_budget_renews_after_its_window() {
-    let started = Instant::now();
-    let (mut server, mut client) = pair(Limits {
-        handshake_limit_per_ip: 0,
-    });
-    let context = context("alice");
-    let source = device("server");
-    let destination = device("client");
-    let initiation = network(
-        client.initiate(&context, &source).unwrap().unwrap(),
-        &context,
-        &source,
-    );
-    for host in 1..=MAX_HANDSHAKE_SOURCES {
-        let challenge = network(
-            server
-                .receive(
-                    &context,
-                    &destination,
-                    address(u8::try_from(host).unwrap(), 40000),
-                    &initiation,
-                )
-                .unwrap()
-                .unwrap(),
-            &context,
-            &destination,
-        );
-        header(&challenge, 3, 64);
-    }
-    let exhausted = server.receive(&context, &destination, address(250, 40000), &initiation);
-    assert_source_window(started);
-    assert_eq!(exhausted.unwrap_err(), WireGuardError::SourceLimit);
-    // Upstream uses a real clock. This is a bounded actual-time check, not a
-    // claim that ManualClock controls cryptographic engine timers.
-    std::thread::sleep(Duration::from_millis(1100));
-    let renewed = network(
-        server
-            .receive(&context, &destination, address(250, 40000), &initiation)
-            .unwrap()
-            .unwrap(),
-        &context,
-        &destination,
-    );
-    header(&renewed, 3, 64);
-}
-
-#[test]
-fn cookie_challenge_uses_real_timer_retry_and_binds_the_source_socket() {
+fn cookie_challenge_renews_source_budget_and_binds_the_retry_to_the_source_socket() {
     let started = Instant::now();
     let (mut server, mut client) = pair(Limits {
         handshake_limit_per_ip: 0,
@@ -1306,6 +1259,17 @@ fn cookie_challenge_uses_real_timer_retry_and_binds_the_source_socket() {
     );
     assert_source_window(started);
     let deadline = Instant::now() + Duration::from_secs(8);
+    // The upstream source budget renews on its real clock.
+    std::thread::sleep(Duration::from_millis(1100));
+    let renewed = network(
+        server
+            .receive(&context, &destination, address(250, 40000), &initiation)
+            .unwrap()
+            .unwrap(),
+        &context,
+        &destination,
+    );
+    header(&renewed, 3, 64);
     let retry = loop {
         if let Some(event) = client.tick(&context, &source).unwrap() {
             break network(event, &context, &source);

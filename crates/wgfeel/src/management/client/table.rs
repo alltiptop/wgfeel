@@ -132,10 +132,20 @@ mod tests {
             {"id":"phone","metadata":{"name":"Телефон","description":null}},
             {"id":"pc","metadata":{"name":null,"description":"Рабочий"}}
         ]});
-        assert_eq!(
-            render("device", &serde_json::to_vec(&body).unwrap()).unwrap(),
-            "ID     NAME     DESCRIPTION\nphone  Телефон  -\npc     -        Рабочий\n"
-        );
+        let table = render("device", &serde_json::to_vec(&body).unwrap()).unwrap();
+        let mut rows = table.lines();
+        let mut header_columns = None;
+        for cells in [
+            ["ID", "NAME", "DESCRIPTION"],
+            ["phone", "Телефон", "-"],
+            ["pc", "-", "Рабочий"],
+        ] {
+            let row = rows.next().unwrap();
+            assert!(row.split_whitespace().eq(cells));
+            let columns = cells.map(|cell| row[..row.find(cell).unwrap()].chars().count());
+            assert_eq!(columns, *header_columns.get_or_insert(columns));
+        }
+        assert!(rows.next().is_none());
     }
 
     #[test]

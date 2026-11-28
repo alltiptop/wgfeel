@@ -112,6 +112,24 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn invalid_uninstall_arguments_are_rejected_before_preparing_a_plan() {
+    for flags in [
+        vec!["--confirm", "wgfeel"],
+        vec!["--purge", "--confirm"],
+        vec!["--purge", "--purge", "--confirm", "wgfeel"],
+        vec!["--dry-run", "--dry-run"],
+        vec!["--install-dir", "/tmp/one", "--install-dir", "/tmp/two"],
+        vec!["--install-dir", "relative"],
+        vec!["--unknown"],
+        vec!["extra"],
+        vec!["--purge", "--confirm", "wgfeel", "--confirm", "wgfeel"],
+    ] {
+        let args: Vec<_> = flags.iter().map(OsString::from).collect();
+        assert!(Options::parse(&args).is_err(), "{flags:?}");
+    }
+}
+
+#[test]
 fn uninstall_removes_only_its_owned_manual_and_shell_adapters() {
     let fixture = Fixture::new();
     let mut receipt: serde_json::Value =

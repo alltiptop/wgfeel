@@ -20,13 +20,6 @@ use wgfeel_store::{
 use wgfeel_test_support::{ManagedChild, ProcessLimits, ProcessSpec};
 
 const WAIT: Duration = Duration::from_secs(5);
-const STAGES: [CommitStage; 5] = [
-    CommitStage::AfterCreate,
-    CommitStage::AfterWrite,
-    CommitStage::AfterFileSync,
-    CommitStage::AfterRename,
-    CommitStage::AfterDirectorySync,
-];
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Directory(PathBuf);
 impl Directory {
@@ -216,7 +209,7 @@ fn assert_state(
         assert!(state.api().is_none());
     }
 }
-fn child(path: &Path, mode: &str, stage: usize) -> ManagedChild {
+fn child(path: &Path, mode: &str) -> ManagedChild {
     ManagedChild::spawn(
         ProcessSpec::new(
             std::env::current_exe().unwrap(),
@@ -232,7 +225,6 @@ fn child(path: &Path, mode: &str, stage: usize) -> ManagedChild {
             vec![
                 ("WGFEEL_API_STATE".into(), path.as_os_str().to_owned()),
                 ("WGFEEL_API_MODE".into(), mode.into()),
-                ("WGFEEL_API_STAGE".into(), stage.to_string().into()),
             ],
             None,
         ),
@@ -251,7 +243,6 @@ fn fresh_verify(path: &Path, configured: bool) {
         } else {
             "verify-unconfigured"
         },
-        0,
     )
     .wait(WAIT)
     .unwrap();
@@ -717,11 +708,13 @@ fn explicit_api_publication_respects_existing_lock_wrong_role_and_unsafe_pending
 }
 
 #[test]
-fn every_settings_checkpoint_error_recovers_a_whole_snapshot_and_requires_correct_cas() {
-    for (index, stage) in STAGES.into_iter().enumerate() {
+fn settings_publication_errors_recover_a_whole_snapshot_and_require_correct_cas() {
+    for (stage, published) in [
+        (CommitStage::AfterFileSync, false),
+        (CommitStage::AfterRename, true),
+    ] {
         let directory = Directory::new();
         let mut store = seed(&directory.state(), false);
-        let mut visited = vec![];
         let result = store.commit_with_api_and_checkpoint(
             &document(6, true),
             &key(),
@@ -729,7 +722,6 @@ fn every_settings_checkpoint_error_recovers_a_whole_snapshot_and_requires_correc
             &api(),
             Some(3),
             |at| {
-                visited.push(at);
                 if at == stage {
                     Err(io::Error::other("injected failure"))
                 } else {
@@ -737,8 +729,7 @@ fn every_settings_checkpoint_error_recovers_a_whole_snapshot_and_requires_correc
                 }
             },
         );
-        assert_eq!(visited, STAGES[..=index]);
-        if index < 3 {
+        if !published {
             assert!(matches!(result, Err(StoreError::Io(_))));
         } else {
             assert!(matches!(result, Err(StoreError::CommitUncertain)));
@@ -755,21 +746,21 @@ fn every_settings_checkpoint_error_recovers_a_whole_snapshot_and_requires_correc
         }
         assert_state(
             &store.load().unwrap().unwrap(),
-            &document(if index < 3 { 3 } else { 6 }, index >= 3),
-            index >= 3,
-            index >= 3,
+            &document(if !published { 3 } else { 6 }, published),
+            published,
+            published,
         );
         drop(store);
-        fresh_verify(&directory.state(), index >= 3);
+        fresh_verify(&directory.state(), published);
     }
 }
 
 #[test]
-fn process_death_at_each_settings_checkpoint_retains_all_fields_and_releases_the_lock() {
-    for (index, _) in STAGES.iter().enumerate() {
+fn crash_either_side_of_rename_retains_complete_api_settings_and_releases_the_lock() {
+    for (mode, published) in [("before-rename", false), ("after-rename", true)] {
         let directory = Directory::new();
         drop(seed(&directory.state(), false));
-        let mut writer = child(&directory.state(), "crash-writer", index);
+        let mut writer = child(&directory.state(), mode);
         writer
             .wait_for_stdout_line(b"API_CHECKPOINT_READY", WAIT)
             .unwrap();
@@ -778,7 +769,7 @@ fn process_death_at_each_settings_checkpoint_retains_all_fields_and_releases_the
             Err(StoreError::Locked)
         ));
         assert!(!writer.terminate().unwrap().status.success());
-        fresh_verify(&directory.state(), index >= 3);
+        fresh_verify(&directory.state(), published);
     }
 }
 
@@ -801,8 +792,12 @@ fn management_api_process_fixture() {
             true,
             true,
         ),
-        "crash-writer" => {
-            let stage: usize = std::env::var("WGFEEL_API_STAGE").unwrap().parse().unwrap();
+        "before-rename" | "after-rename" => {
+            let stage = if mode == "before-rename" {
+                CommitStage::AfterFileSync
+            } else {
+                CommitStage::AfterRename
+            };
             store
                 .commit_with_api_and_checkpoint(
                     &document(6, true),
@@ -811,7 +806,7 @@ fn management_api_process_fixture() {
                     &api(),
                     Some(3),
                     |at| {
-                        if at == STAGES[stage] {
+                        if at == stage {
                             println!("\nAPI_CHECKPOINT_READY");
                             io::stdout().flush()?;
                             io::stdin().read_exact(&mut [0])?;

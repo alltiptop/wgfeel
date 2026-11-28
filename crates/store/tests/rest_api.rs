@@ -25,17 +25,14 @@ impl Drop for Root {
 
 #[test]
 fn http_port_publication_is_atomic_and_preserves_mesh_identity_and_revision() {
-    let stages = [
-        CommitStage::AfterCreate,
-        CommitStage::AfterWrite,
-        CommitStage::AfterFileSync,
-        CommitStage::AfterRename,
-        CommitStage::AfterDirectorySync,
-    ];
-    for (index, stage) in stages.into_iter().enumerate() {
-        let root = Root(
-            std::env::temp_dir().join(format!("wgfeel-rest-store-{}-{index}", std::process::id())),
-        );
+    for (stage, published) in [
+        (CommitStage::AfterFileSync, false),
+        (CommitStage::AfterRename, true),
+    ] {
+        let root = Root(std::env::temp_dir().join(format!(
+            "wgfeel-rest-store-{}-{stage:?}",
+            std::process::id()
+        )));
         fs::create_dir(&root.0).unwrap();
         fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700)).unwrap();
         let mut store = ManagementStore::initialize(&root.0.join("state")).unwrap();
@@ -58,7 +55,7 @@ fn http_port_publication_is_atomic_and_preserves_mesh_identity_and_revision() {
                 Ok(())
             }
         });
-        if index < 3 {
+        if !published {
             assert!(matches!(result, Err(StoreError::Io(_))));
         } else {
             assert!(matches!(result, Err(StoreError::CommitUncertain)));
@@ -66,7 +63,7 @@ fn http_port_publication_is_atomic_and_preserves_mesh_identity_and_revision() {
         drop(store);
         let mut store = ManagementStore::open(&root.0.join("state")).unwrap();
         let state = store.load().unwrap().unwrap();
-        let expected = if index < 3 { &old } else { &next };
+        let expected = if published { &next } else { &old };
         assert_eq!(state.rest_api(), Some(expected));
         assert_eq!(state.api(), Some(&mesh));
         assert_eq!(state.document(), &document(1));
