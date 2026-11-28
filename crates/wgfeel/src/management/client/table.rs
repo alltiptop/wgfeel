@@ -129,16 +129,16 @@ mod tests {
     #[test]
     fn unicode_metadata_is_aligned_and_missing_values_are_explicit() {
         let body = json!({"devices":[
-            {"id":"phone","metadata":{"name":"Телефон","description":null}},
-            {"id":"pc","metadata":{"name":null,"description":"Рабочий"}}
+            {"id":"phone","metadata":{"name":"Work‑phone","description":null}},
+            {"id":"pc","metadata":{"name":null,"description":"Work"}}
         ]});
         let table = render("device", &serde_json::to_vec(&body).unwrap()).unwrap();
         let mut rows = table.lines();
         let mut header_columns = None;
         for cells in [
             ["ID", "NAME", "DESCRIPTION"],
-            ["phone", "Телефон", "-"],
-            ["pc", "-", "Рабочий"],
+            ["phone", "Work‑phone", "-"],
+            ["pc", "-", "Work"],
         ] {
             let row = rows.next().unwrap();
             assert!(row.split_whitespace().eq(cells));
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn terminal_controls_are_escaped_and_long_values_are_bounded() {
         assert_eq!(cell("a\n\t\x1b[31m\u{202e}"), "a\\n\\t\\u{1b}[31m\\u{202e}");
-        let long = cell(&"я".repeat(100));
+        let long = cell(&"§".repeat(100));
         assert_eq!(long.chars().count(), 72);
         assert!(long.ends_with('…'));
     }

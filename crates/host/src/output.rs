@@ -118,12 +118,12 @@ mod tests {
 
     #[test]
     fn details_keep_nested_data_full_values_and_escape_terminal_controls() {
-        let value = json!({"id":"alice", "devices":[{"id":"phone", "metadata":{"name":"Телефон\n\u{1b}[31m", "description":"я".repeat(100)}}], "networks":[], "endpoint":null});
+        let value = json!({"id":"alice", "devices":[{"id":"phone", "metadata":{"name":"Sam’s phone\n\u{1b}[31m", "description":"§".repeat(100)}}], "networks":[], "endpoint":null});
         let text = render("User", &value);
         assert!(text.starts_with("User\n  ID"));
         assert!(text.contains("Devices (1):\n    [1]\n      ID"));
-        assert!(text.contains("Телефон\\n\\u{1b}[31m"));
-        assert!(text.contains(&"я".repeat(100)));
+        assert!(text.contains("Sam’s phone\\n\\u{1b}[31m"));
+        assert!(text.contains(&"§".repeat(100)));
         assert!(text.contains("Networks : none"));
         assert!(!text.contains('\u{1b}'));
     }

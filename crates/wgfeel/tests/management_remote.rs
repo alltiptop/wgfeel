@@ -249,7 +249,7 @@ fn remote_commands_share_durable_authority_across_restart_and_require_bearer() {
     fixture.join_child("gateway1", endpoint);
     assert!(
         fixture
-            .remote(&["user", "add", "Alice"], "Мой телефон\n0\n", true)
+            .remote(&["user", "add", "Alice"], "Alice’s phone\n0\n", true)
             .contains("User added: Alice")
     );
     let users = api::json(&fixture.state(), "GET", "/api/v1/users", Value::Null);
@@ -265,7 +265,7 @@ fn remote_commands_share_durable_authority_across_restart_and_require_bearer() {
             "",
             true
         ),
-        format!("{device}\tAlice / Мой телефон\n")
+        format!("{device}\tAlice / Alice’s phone\n")
     );
     assert!(
         fixture
@@ -298,7 +298,7 @@ printf '%s\n' "${COMPREPLY[@]}"
     assert!(output.stderr.is_empty());
     assert_eq!(output.stdout, format!("{device}\n").as_bytes());
     let before = fixture.remote(&["device", "show", device], "", true);
-    assert!(before.contains("Мой телефон:"));
+    assert!(before.contains("Alice’s phone:"));
     assert!(before.contains("[Interface]"));
     stop(child);
     let child = fixture.start(4);

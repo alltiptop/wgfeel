@@ -24,7 +24,7 @@ fn identifiers_reject_empty_oversized_and_ambiguous_input() {
         "a.b",
         "a:b",
         "a\n",
-        "сеть",
+        "caf\u{e9}",
         &"a".repeat(65),
     ] {
         assert_eq!(

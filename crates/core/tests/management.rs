@@ -164,7 +164,7 @@ fn client_identifiers_use_existing_opaque_ascii_syntax() {
     for value in ["a", "_", "-", "Alice_42-Z", &"x".repeat(64)] {
         assert_eq!(ClientId::new(value).unwrap().as_str(), value);
     }
-    for value in ["", "a.b", "a b", "é", "a/b", "a\n", &"x".repeat(65)] {
+    for value in ["", "a.b", "a b", "\u{e9}", "a/b", "a\n", &"x".repeat(65)] {
         assert_eq!(ClientId::new(value), Err(DomainError::InvalidIdentifier));
     }
     assert_ne!(client_id("Alice"), client_id("alice"));
@@ -177,7 +177,7 @@ fn optional_metadata_preserves_unicode_and_spaces_with_utf8_byte_limits() {
     let absent = DeviceMetadata::new(None, None).unwrap();
     assert_eq!(absent.name(), None);
     assert_eq!(absent.description(), None);
-    let name = "é".repeat(64);
+    let name = "\u{e9}".repeat(64);
     let description = "🦀".repeat(256);
     let maximum = DeviceMetadata::new(Some(name.clone()), Some(description.clone())).unwrap();
     assert_eq!(maximum.name(), Some(name.as_str()));
@@ -190,7 +190,7 @@ fn optional_metadata_preserves_unicode_and_spaces_with_utf8_byte_limits() {
         DeviceMetadata::new(None, Some(format!("{description}x"))),
         Err(DomainError::InvalidMetadata)
     );
-    let text = "  e\u{301} / название  ";
+    let text = "  e\u{301} / name  ";
     let preserved = DeviceMetadata::new(Some(text.into()), Some(" ".into())).unwrap();
     assert_eq!(preserved.name(), Some(text));
     assert_eq!(preserved.description(), Some(" "));
@@ -460,7 +460,7 @@ const LITERAL: &str = r#"{
   "management_version":1,"management_id":"management",
   "config":{"schema_version":1,"generation":7,"networks":[{"id":"alpha","devices":[{"id":"laptop","public_key":[11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11],"addresses":["10.1.0.1"]}]},{"id":"empty","devices":[]}],"policy":{"global_rules":[],"local_rules":[],"grants":[]}},
   "assignments":[{"recipient":"gateway","traffic":"entry","service_public_key":[101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101,101],"gateway_public_key":[201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201,201],"networks":["alpha"],"tenants":[{"network":"alpha","public_key":[102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102,102]}]}],
-  "clients":[{"id":"alice","networks":["alpha"],"devices":[{"id":"laptop","metadata":{"name":"Ноутбук","description":null}}]},{"id":"empty","networks":["empty"],"devices":[]}]
+  "clients":[{"id":"alice","networks":["alpha"],"devices":[{"id":"laptop","metadata":{"name":"Sam’s laptop","description":null}}]},{"id":"empty","networks":["empty"],"devices":[]}]
 }"#;
 
 #[test]
@@ -469,7 +469,7 @@ fn independent_json_fixture_decodes_optional_metadata_and_roundtrips_public_docu
     let selected = doc
         .select_device(&client_id("alice"), &device_id("laptop"), None)
         .unwrap();
-    assert_eq!(selected.device.metadata().name(), Some("Ноутбук"));
+    assert_eq!(selected.device.metadata().name(), Some("Sam’s laptop"));
     assert_eq!(selected.device.metadata().description(), None);
     assert_eq!(selected.network.id(), &network_id("alpha"));
     assert_eq!(selected.registration.public_key(), &key(11));
@@ -479,7 +479,7 @@ fn independent_json_fixture_decodes_optional_metadata_and_roundtrips_public_docu
         r#"{"description":null}"#,
         r#"{"name":null,"description":null}"#,
     ] {
-        let json = LITERAL.replace(r#"{"name":"Ноутбук","description":null}"#, metadata);
+        let json = LITERAL.replace(r#"{"name":"Sam’s laptop","description":null}"#, metadata);
         let parsed = ManagementDocument::from_json(&json).unwrap();
         let selected = parsed
             .select_device(&client_id("alice"), &device_id("laptop"), None)
@@ -496,7 +496,7 @@ fn independent_json_fixture_decodes_optional_metadata_and_roundtrips_public_docu
     assert_eq!(value["management_id"], "management");
     assert_eq!(
         value["clients"][0]["devices"][0]["metadata"]["name"],
-        "Ноутбук"
+        "Sam’s laptop"
     );
     assert!(!encoded.contains("private_key"));
     assert!(!encoded.contains("credential"));
@@ -525,12 +525,18 @@ fn json_rejects_unknown_duplicate_missing_and_mistyped_fields_at_each_new_bounda
             r#""id":"laptop","metadata""#,
             r#""id":"laptop","owner":"foreign","metadata""#,
         ),
-        (r#""name":"Ноутбук""#, r#""name":null,"name":"Ноутбук""#),
+        (
+            r#""name":"Sam’s laptop""#,
+            r#""name":null,"name":"Sam’s laptop""#,
+        ),
         (
             r#""description":null"#,
             r#""description":null,"description":null"#,
         ),
-        (r#""name":"Ноутбук""#, r#""alias":"x","name":"Ноутбук""#),
+        (
+            r#""name":"Sam’s laptop""#,
+            r#""alias":"x","name":"Sam’s laptop""#,
+        ),
         (
             r#""recipient":"gateway""#,
             r#""recipient":"gateway","recipient":"gateway""#,
@@ -543,9 +549,9 @@ fn json_rejects_unknown_duplicate_missing_and_mistyped_fields_at_each_new_bounda
             r#""network":"alpha","public_key""#,
             r#""network":"alpha","network":"alpha","public_key""#,
         ),
-        (r#""name":"Ноутбук""#, r#""name":12"#),
+        (r#""name":"Sam’s laptop""#, r#""name":12"#),
         (
-            r#""metadata":{"name":"Ноутбук","description":null}"#,
+            r#""metadata":{"name":"Sam’s laptop","description":null}"#,
             r#""metadata":null"#,
         ),
     ] {
@@ -616,7 +622,7 @@ fn structurally_valid_json_cannot_bypass_ownership_or_metadata_validation() {
         format!(r#""name":"{}""#, "x".repeat(129)),
     ] {
         assert_eq!(
-            ManagementDocument::from_json(&LITERAL.replace(r#""name":"Ноутбук""#, &invalid)),
+            ManagementDocument::from_json(&LITERAL.replace(r#""name":"Sam’s laptop""#, &invalid)),
             Err(DomainError::InvalidMetadata)
         );
     }

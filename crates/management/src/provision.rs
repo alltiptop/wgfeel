@@ -521,7 +521,7 @@ mod dns_names {
             "my-laptop"
         );
         assert_eq!(
-            hostname("ноутбук", &empty).map_err(|e| e.1).unwrap(),
+            hostname("\u{e9}", &empty).map_err(|e| e.1).unwrap(),
             "device"
         );
         let device = Device::new(
