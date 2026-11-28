@@ -364,7 +364,7 @@ mod tests {
         let response = Response {
             status: 201,
             generation: Some(42),
-            body: "{\"name\":\"Ноутбук\"}".as_bytes().to_vec(),
+            body: "{\"name\":\"Sam’s laptop\"}".as_bytes().to_vec(),
             is_config: false,
         };
         let wire = encode_response(&response);

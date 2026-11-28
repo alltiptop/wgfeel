@@ -52,7 +52,7 @@ fn accepts_sources_unicode_licenses_and_native_shell_resources() {
         "share/zsh/site-functions/_wgfeel",
         "share/man/man1/wgfeel.1",
     ] {
-        fixture.write(path, "text with Unicode: сеть ⇄ mesh\n");
+        fixture.write(path, "text with Unicode: network ⇄ mesh\n");
     }
     let report = inspect(&fixture.0, true).unwrap();
     assert!(report.problems.is_empty());

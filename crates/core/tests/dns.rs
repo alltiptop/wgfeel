@@ -46,7 +46,7 @@ fn dns_labels_are_scoped_and_reserved_service_addresses_cannot_be_devices() {
         "-pc",
         "pc-",
         "pc\nfoo",
-        "привет",
+        "caf\u{e9}",
     ] {
         assert_eq!(
             a.clone().with_hostname(Some(name.into())),
