@@ -331,28 +331,29 @@ fn user_network<'a>(
         .ok_or(ApiError(500, "missing_network"))
 }
 
-fn device_view<'a>(catalog: &'a ClientDevice, network: &Network) -> DeviceView<'a> {
+fn device_view<'a>(catalog: &'a ClientDevice, network: &'a Network) -> DeviceView<'a> {
+    let registered = network.devices().iter().find(|d| d.id() == catalog.id());
     DeviceView {
         id: catalog.id(),
         metadata: catalog.metadata(),
-        registration: network
-            .devices()
-            .iter()
-            .find(|d| d.id() == catalog.id())
-            .map(|d| DeviceBroadcast {
-                broadcast: d.broadcast(),
-                effective_broadcast: network.effective_broadcast(d),
-            }),
+        addresses: registered.map_or(&[], Device::addresses),
+        registration: registered.map(|d| DeviceBroadcast {
+            broadcast: d.broadcast(),
+            effective_broadcast: network.effective_broadcast(d),
+        }),
     }
 }
-fn device_views<'a>(client: &'a Client, network: &Network) -> Vec<DeviceView<'a>> {
+fn device_views<'a>(client: &'a Client, network: &'a Network) -> Vec<DeviceView<'a>> {
     client
         .devices()
         .iter()
         .map(|d| device_view(d, network))
         .collect()
 }
-fn user_view<'a>(document: &ManagementDocument, client: &'a Client) -> Result<User<'a>, ApiError> {
+fn user_view<'a>(
+    document: &'a ManagementDocument,
+    client: &'a Client,
+) -> Result<User<'a>, ApiError> {
     let network = user_network(document, client)?;
     Ok(User {
         id: client.id(),

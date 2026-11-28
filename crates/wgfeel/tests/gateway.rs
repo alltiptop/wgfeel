@@ -361,6 +361,16 @@ fn checksum(bytes: &[u8]) -> u16 {
     !(sum as u16)
 }
 fn packet(ipv6: bool, source: u8, destination: u8, hops: u8, marker: u8) -> Vec<u8> {
+    packet_with_payload(ipv6, source, destination, hops, [marker; 4])
+}
+
+fn packet_with_payload(
+    ipv6: bool,
+    source: u8,
+    destination: u8,
+    hops: u8,
+    payload: [u8; 4],
+) -> Vec<u8> {
     let offset = if ipv6 { 40 } else { 20 };
     let mut bytes = vec![0; offset + 12];
     if ipv6 {
@@ -393,7 +403,7 @@ fn packet(ipv6: bool, source: u8, destination: u8, hops: u8, marker: u8) -> Vec<
     }
     bytes[offset..offset + 4].copy_from_slice(&[0x9c, 0x40, 0x1f, 0x90]);
     bytes[offset + 4..offset + 6].copy_from_slice(&12_u16.to_be_bytes());
-    bytes[offset + 8..].fill(marker);
+    bytes[offset + 8..].copy_from_slice(&payload);
     let mut pseudo = if ipv6 {
         bytes[8..40].to_vec()
     } else {

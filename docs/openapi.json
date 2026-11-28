@@ -388,6 +388,14 @@
       },
       "DeviceView": {
         "properties": {
+          "addresses": {
+            "description": "Tunnel IP addresses assigned to the device; empty when the device exists only in the catalog.",
+            "items": {
+              "format": "ip",
+              "type": "string"
+            },
+            "type": "array"
+          },
           "id": {
             "type": "string"
           },
@@ -409,6 +417,7 @@
         "required": [
           "id",
           "metadata",
+          "addresses",
           "registration"
         ],
         "type": "object"
@@ -3489,7 +3498,7 @@
                 }
               }
             },
-            "description": "List the user's device IDs and metadata.",
+            "description": "List the user's device IDs, addresses and metadata.",
             "headers": {
               "ETag": {
                 "description": "Quoted current configuration revision.",
@@ -3532,7 +3541,7 @@
             "$ref": "#/components/responses/ApiError"
           }
         },
-        "summary": "List the user's device IDs and metadata."
+        "summary": "List the user's device IDs, addresses and metadata."
       },
       "post": {
         "operationId": "create_device",
@@ -3829,7 +3838,7 @@
                 }
               }
             },
-            "description": "Get the device ID and metadata.",
+            "description": "Get the device ID, addresses and metadata.",
             "headers": {
               "ETag": {
                 "description": "Quoted current configuration revision.",
@@ -3872,7 +3881,7 @@
             "$ref": "#/components/responses/ApiError"
           }
         },
-        "summary": "Get the device ID and metadata."
+        "summary": "Get the device ID, addresses and metadata."
       }
     },
     "/api/v1/users/{user}/devices/{device}/broadcast": {

@@ -142,24 +142,34 @@ fn workload(count: u16) {
     let mut sent = 0u32;
     let mut received = 0u32;
     let mut worst = Duration::ZERO;
+    let sample_window = Duration::from_millis(30);
     std::thread::scope(|scope| {
         let delivery = scope.spawn(|| apply(address, &next));
-        while !delivery.is_finished() {
-            let begin = Instant::now();
-            let marker = sent as u8;
-            src.send(address, &packet(false, 1, 2, 64, marker));
+        loop {
             sent += 1;
-            while begin.elapsed() < Duration::from_millis(30) {
+            let payload = sent.to_be_bytes();
+            let probe = packet_with_payload(false, 1, 2, 64, payload);
+            let expected = packet_with_payload(false, 1, 2, 63, payload);
+            let begin = Instant::now();
+            src.send(address, &probe);
+            while begin.elapsed() < sample_window {
                 let mut buffer = [0; 1313];
                 if let Ok((n, from)) = dst.socket.recv_from(&mut buffer)
+                    && from == address
                     && let TunnResult::WriteToTunnel(plain) = dst.receive(from, &buffer[..n])
-                    && plain.as_ref().get(..32) == Some(&packet(false, 1, 2, 63, marker))
+                    && plain.as_ref().starts_with(&expected)
                 {
-                    received += 1;
-                    worst = worst.max(begin.elapsed());
+                    let latency = begin.elapsed();
+                    if latency <= sample_window {
+                        received += 1;
+                        worst = worst.max(latency);
+                    }
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
+            }
+            if delivery.is_finished() {
+                break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -172,6 +182,10 @@ fn workload(count: u16) {
         update.elapsed().as_millis(),
         worst.as_micros(),
         memory(&group, "memory.peak")
+    );
+    assert!(
+        received > 0,
+        "none of {sent} update probes arrived within {sample_window:?}"
     );
     if std::env::var_os("WGFEEL_CAPACITY_BINARY").is_none() {
         assert_eq!(retained, workers.len() - 1);

@@ -101,7 +101,7 @@ fn secret_types_preserve_explicit_access_and_redact_debug() {
 }
 
 #[test]
-fn errors_have_standard_error_contract_without_input_echo() {
+fn domain_errors_implement_error_and_have_nonempty_messages() {
     fn standard_error(error: &dyn std::error::Error) {
         assert!(!error.to_string().is_empty());
     }

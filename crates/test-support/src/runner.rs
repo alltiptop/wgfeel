@@ -1,5 +1,9 @@
 //! Serial test runner for binaries that also serve as their own worker executable.
-use std::{ffi::OsString, process::ExitCode};
+use std::{
+    ffi::OsString,
+    io::{self, Write},
+    process::ExitCode,
+};
 
 /// Register functions using their Rust names so filters and listings match.
 #[macro_export]
@@ -69,7 +73,7 @@ impl<'a> Selection<'a> {
                 name.contains(filter)
             }
         };
-        // Both worker suites contain only active tests.
+        // These self-executing suites register only active tests.
         !self.ignored_only
             && (self.filters.is_empty() || self.filters.iter().any(matches))
             && !self.skip.iter().any(matches)
@@ -79,11 +83,18 @@ impl<'a> Selection<'a> {
 type Case = (&'static str, fn());
 
 pub fn run(arguments: &[OsString], cases: &[Case]) -> ExitCode {
+    run_to(arguments, cases, io::stdout()).unwrap_or_else(|error| {
+        eprintln!("cannot write worker test results: {error}");
+        ExitCode::FAILURE
+    })
+}
+
+fn run_to(arguments: &[OsString], cases: &[Case], mut out: impl Write) -> io::Result<ExitCode> {
     let selection = match Selection::parse(arguments) {
         Ok(selection) => selection,
         Err(error) => {
             eprintln!("{error}");
-            return ExitCode::FAILURE;
+            return Ok(ExitCode::FAILURE);
         }
     };
     let mut selected = 0;
@@ -94,33 +105,34 @@ pub fn run(arguments: &[OsString], cases: &[Case]) -> ExitCode {
         }
         selected += 1;
         if selection.list {
-            println!("{name}: test");
+            writeln!(out, "{name}: test")?;
         } else if std::panic::catch_unwind(case).is_err() {
             failed += 1;
-            println!("test {name} ... FAILED");
+            writeln!(out, "test {name} ... FAILED")?;
         } else if selection.terse {
-            print!(".");
+            write!(out, ".")?;
         } else {
-            println!("test {name} ... ok");
+            writeln!(out, "test {name} ... ok")?;
         }
     }
     if selection.list {
         if !selection.terse {
-            println!("\n{selected} tests, 0 benchmarks");
+            writeln!(out, "\n{selected} tests, 0 benchmarks")?;
         }
     } else {
         let passed = selected - failed;
         let filtered = cases.len() - selected;
-        println!(
+        writeln!(
+            out,
             "\ntest result: {}. {passed} passed; {failed} failed; {filtered} filtered out",
             if failed == 0 { "ok" } else { "FAILED" }
-        );
+        )?;
     }
-    if failed == 0 {
+    Ok(if failed == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
+    })
 }
 
 #[cfg(test)]
@@ -140,9 +152,19 @@ mod tests {
     #[test]
     fn listing_and_filtered_runs_never_execute_the_case() {
         let cases: &[Case] = &[("first_worker", || panic!("unexpected execution"))];
+        let mut listing = Vec::new();
+        assert_eq!(
+            run_to(&["--list".into()], cases, &mut listing).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert!(
+            std::str::from_utf8(&listing)
+                .unwrap()
+                .lines()
+                .any(|line| line == "first_worker: test")
+        );
         for args in [
-            &["--list"][..],
-            &["--exact", "first"],
+            &["--exact", "first"][..],
             &["--ignored"],
             &["worker", "--skip=first"],
         ] {

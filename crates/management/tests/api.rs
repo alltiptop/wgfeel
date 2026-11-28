@@ -539,7 +539,35 @@ fn authenticated_reads_are_public_exact_and_do_not_mutate_the_snapshot() {
     let users = expected
         .clients()
         .iter()
-        .map(|client| serde_json::json!({"id":client.id(), "name":client.name(), "suspended":false, "broadcast":true, "devices":client.devices().iter().map(|d| serde_json::json!({"id":d.id(),"metadata":d.metadata(),"registration":{"broadcast":null,"effective_broadcast":true}})).collect::<Vec<_>>(), "egresses":[]}))
+        .map(|client| {
+            let network = expected
+                .routing()
+                .config()
+                .networks()
+                .iter()
+                .find(|network| network.id() == client.network())
+                .unwrap();
+            serde_json::json!({
+                "id": client.id(),
+                "name": client.name(),
+                "suspended": false,
+                "broadcast": true,
+                "devices": client.devices().iter().map(|d| {
+                    let addresses = network
+                        .devices()
+                        .iter()
+                        .find(|entry| entry.id() == d.id())
+                        .map_or(&[][..], Device::addresses);
+                    serde_json::json!({
+                        "id": d.id(),
+                        "metadata": d.metadata(),
+                        "addresses": addresses,
+                        "registration": {"broadcast": null, "effective_broadcast": true}
+                    })
+                }).collect::<Vec<_>>(),
+                "egresses": []
+            })
+        })
         .collect::<Vec<_>>();
     let gateways = vec![
         serde_json::json!({"recipient":"gateway-one","service_public_key":key(101),"gateway_public_key":wgfeel_test_support::fixture_gateway_public(&key(101)),"endpoint":null,"endpoints":[],"hostname":null,"auto_users":false,"traffic":"entry","users":["alice","alice-work","bob"],"tenants":[{"user":"alice","public_key":key(102)},{"user":"alice-work","public_key":key(103)},{"user":"bob","public_key":key(104)}]}),
@@ -1437,6 +1465,7 @@ fn catalog_only_devices_are_visible_and_neither_broadcast_operation_can_register
     );
     let obj = serde_json::from_slice::<Value>(&r.body).unwrap();
     assert_eq!(r.status, 200);
+    assert_eq!(obj.get("addresses"), Some(&json!([])));
     assert_eq!(obj.get("registration"), Some(&Value::Null));
     for (method, rev, b) in [
         ("GET", None, ""),

@@ -168,6 +168,8 @@ pub(super) struct Devices<'a> {
 pub(super) struct DeviceView<'a> {
     pub id: &'a DeviceId,
     pub metadata: &'a DeviceMetadata,
+    /// Tunnel IP addresses assigned to the device; empty when the device exists only in the catalog.
+    pub addresses: &'a [IpAddr],
     /// Null when the device exists only in the catalog.
     pub registration: Option<DeviceBroadcast>,
 }

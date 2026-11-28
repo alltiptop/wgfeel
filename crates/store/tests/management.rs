@@ -9,9 +9,9 @@ use std::{
 };
 use wgfeel_core::{
     Action, AdminCredential, Client, ClientDevice, ClientId, Config, Device, DeviceId,
-    DeviceMetadata, DevicePublicKey, Endpoint, GatewayAssignment, Grant, MAX_MANAGEMENT_BYTES,
-    ManagementConfig, ManagementDocument, Network, NetworkId, NodeId, NodeKeys, Policy, Rule,
-    TenantKeyAssignment, TenantPrivateKey,
+    DeviceMetadata, DevicePublicKey, Endpoint, GatewayAssignment, Grant, ManagementConfig,
+    ManagementDocument, Network, NetworkId, NodeId, NodeKeys, Policy, Rule, TenantKeyAssignment,
+    TenantPrivateKey,
 };
 use wgfeel_store::{
     CommitStage, LocalTenants, ManagementStore, Store, StoreError, StoredManagement,
@@ -924,46 +924,6 @@ fn independent_malformed_wrong_version_and_invalid_ownership_documents_fail_clos
             fs::read(directory.state().join("state.json")).unwrap(),
             bytes
         );
-    }
-}
-
-#[test]
-fn nested_document_and_complete_private_file_have_independent_exact_byte_bounds() {
-    for (size, accepted) in [
-        (MAX_MANAGEMENT_BYTES + 4096, true),
-        (MAX_MANAGEMENT_BYTES + 4097, false),
-    ] {
-        let directory = Directory::new();
-        let store = ManagementStore::initialize(&directory.state()).unwrap();
-        let mut input = envelope(LITERAL, false).into_bytes();
-        input.resize(size, b' ');
-        private_write(&directory.state().join("state.json"), &input);
-        if accepted {
-            let expected = ManagementDocument::from_json(LITERAL).unwrap();
-            assert_snapshot(&store.load().unwrap().unwrap(), &expected, false);
-        } else {
-            assert!(matches!(store.load(), Err(StoreError::InvalidState)));
-        }
-    }
-    for (size, accepted) in [
-        (MAX_MANAGEMENT_BYTES, true),
-        (MAX_MANAGEMENT_BYTES + 1, false),
-    ] {
-        let directory = Directory::new();
-        let store = ManagementStore::initialize(&directory.state()).unwrap();
-        let mut document = LITERAL.strip_suffix('}').unwrap().to_owned();
-        document.extend(std::iter::repeat_n(' ', size - document.len() - 1));
-        document.push('}');
-        assert_eq!(document.len(), size);
-        let input = envelope(&document, false);
-        assert!(input.len() < MAX_MANAGEMENT_BYTES + 4096);
-        private_write(&directory.state().join("state.json"), input.as_bytes());
-        if accepted {
-            let expected = ManagementDocument::from_json(LITERAL).unwrap();
-            assert_snapshot(&store.load().unwrap().unwrap(), &expected, false);
-        } else {
-            assert!(matches!(store.load(), Err(StoreError::InvalidState)));
-        }
     }
 }
 

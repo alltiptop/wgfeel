@@ -68,8 +68,50 @@ fn binary_identity_does_not_depend_on_filename_or_argv_zero() {
 
 #[test]
 fn package_has_one_executable_target() {
-    let manifest = include_str!("../Cargo.toml");
-    assert_eq!(manifest.matches("[[bin]]").count(), 1);
-    assert!(manifest.contains(r#"name = "wgfeel""#));
-    assert!(!manifest.contains("required-features"));
+    let output = Command::new(env!("CARGO"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "metadata",
+            "--offline",
+            "--locked",
+            "--no-deps",
+            "--format-version=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let package = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == env!("CARGO_PKG_NAME"))
+        .unwrap();
+    let binaries: Vec<_> = package["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kind| kind == "bin")
+        })
+        .collect();
+    let names: Vec<_> = binaries
+        .iter()
+        .map(|target| target["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["wgfeel"]);
+    assert!(
+        binaries[0]
+            .get("required-features")
+            .is_none_or(|f| f.as_array().unwrap().is_empty()),
+        "wgfeel must be available with the default build"
+    );
 }

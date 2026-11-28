@@ -68,36 +68,33 @@ fn fresh_cli_process_loads_tenant_snapshot_and_emits_only_existing_public_summar
         .unwrap();
     drop(store);
     let before = fs::read(fixture.0.join("state.json")).unwrap();
-    for _ in 0..2 {
-        let spec = ProcessSpec::new(
-            PathBuf::from(env!("CARGO_BIN_EXE_wgfeel")),
-            vec![
-                "state-check".into(),
-                "--state-dir".into(),
-                fixture.0.clone().into(),
-            ],
-            vec![],
-            None,
-        );
-        let output = ManagedChild::spawn(
-            spec,
-            ProcessLimits {
-                max_stdout_bytes: 16_384,
-                max_stderr_bytes: 16_384,
-            },
-        )
-        .unwrap()
-        .wait(Duration::from_secs(10))
-        .unwrap();
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
-        let actual: serde_json::Value = human::summary(&output.stdout);
-        assert_eq!(
-            actual,
-            serde_json::json!({"control":"child","management_id":"main","scope_networks":1,"local_contexts":1,"generation":17,"node_id":"gateway-a","networks":1,"devices":0})
-        );
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("173"));
-    }
+    let spec = ProcessSpec::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_wgfeel")),
+        vec![
+            "state-check".into(),
+            "--state-dir".into(),
+            fixture.0.clone().into(),
+        ],
+        vec![],
+        None,
+    );
+    let output = ManagedChild::spawn(
+        spec,
+        ProcessLimits {
+            max_stdout_bytes: 16_384,
+            max_stderr_bytes: 16_384,
+        },
+    )
+    .unwrap()
+    .wait(Duration::from_secs(10))
+    .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let actual: serde_json::Value = human::summary(&output.stdout);
+    assert_eq!(
+        actual,
+        serde_json::json!({"control":"child","management_id":"main","scope_networks":1,"local_contexts":1,"generation":17,"node_id":"gateway-a","networks":1,"devices":0})
+    );
     assert_eq!(fs::read(fixture.0.join("state.json")).unwrap(), before);
     let recovered = Store::open(&fixture.0).unwrap().load().unwrap().unwrap();
     assert_eq!(

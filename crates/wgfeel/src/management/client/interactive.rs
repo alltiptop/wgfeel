@@ -27,6 +27,8 @@ struct User {
 struct Device {
     id: String,
     metadata: Metadata,
+    #[serde(default)]
+    addresses: Vec<std::net::IpAddr>,
     registration: Option<Broadcast>,
 }
 #[derive(Clone, Deserialize)]
@@ -36,6 +38,16 @@ struct Metadata {
 impl Device {
     fn name(&self) -> &str {
         self.metadata.name.as_deref().unwrap_or("Unnamed device")
+    }
+    fn addresses_display(&self) -> String {
+        if self.addresses.is_empty() {
+            return "unassigned".into();
+        }
+        self.addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 #[derive(Clone, Deserialize)]
@@ -215,7 +227,7 @@ impl Ui<'_> {
                 "{}. {} ({})",
                 i + 1,
                 clean(device.name()),
-                device.id
+                device.addresses_display()
             )
             .map_err(|_| IO_ERROR)?;
         }
@@ -721,5 +733,33 @@ mod tests {
         let output = String::from_utf8(out).unwrap();
         assert!(output.contains("laptop (d1) from user Alice (u1)"));
         assert!(output.contains("revision_conflict"));
+    }
+
+    #[test]
+    fn device_list_displays_ip_addresses_instead_of_device_ids() {
+        let api = |method: &str, path: &str, _: Option<u64>, _: &[u8]| {
+            assert_eq!((method, path), ("GET", "/api/v1/users"));
+            Ok(Response {
+                status: 200,
+                generation: Some(7),
+                is_config: false,
+                body: br#"{"users":[{"id":"u1","name":"Alice","suspended":false,"broadcast":true,"devices":[{"id":"dev-1","metadata":{"name":"laptop"},"addresses":["10.203.0.2","fd77:77::2"]},{"id":"dev-2","metadata":{"name":"spare"},"addresses":[]}]}]}"#.to_vec(),
+            })
+        };
+        let mut out = Vec::new();
+        run(
+            "device",
+            Options::parse(&["show".into()]).unwrap(),
+            &api,
+            &mut std::io::Cursor::new("1\n0\n"),
+            &mut out,
+            true,
+        )
+        .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("1. laptop (10.203.0.2, fd77:77::2)\n"));
+        assert!(output.contains("2. spare (unassigned)\n"));
+        assert!(!output.contains("dev-1"));
+        assert!(!output.contains("dev-2"));
     }
 }

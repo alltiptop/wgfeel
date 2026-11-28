@@ -519,12 +519,24 @@ fn all_six_changes_and_credential_rotation_preserve_settings_without_public_proj
 
 const LITERAL_DOCUMENT: &str = r#"{"management_version":1,"management_id":"management","config":{"schema_version":1,"generation":3,"networks":[],"policy":{"global_rules":[],"local_rules":[],"grants":[]}},"assignments":[],"clients":[]}"#;
 fn literal() -> String {
+    literal_snapshot(LITERAL_DOCUMENT, true)
+}
+
+fn literal_snapshot(document: &str, configured: bool) -> String {
+    let api = if configured {
+        format!(
+            r#","api":{{"listen":"0.0.0.0:51820","admin_public_key":{}}}"#,
+            serde_json::to_string(&[181; 32]).unwrap()
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"management_storage_version\":6,\"document\":{LITERAL_DOCUMENT},\"gateway_private_key\":[99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99],\"service_private_key\":{},\"admin_verifier\":{},\"api\":{{\"listen\":\"0.0.0.0:51820\",\"admin_public_key\":{}}}}}",
-        serde_json::to_string(&vec![197; 32]).unwrap(),
+        r#"{{"management_storage_version":6,"document":{document},"gateway_private_key":{},"service_private_key":{},"admin_verifier":{}{api}}}"#,
+        serde_json::to_string(&[99; 32]).unwrap(),
+        serde_json::to_string(&[197; 32]).unwrap(),
         serde_json::to_string(&wgfeel_store::AdminVerifier::new(&credential(false)).unwrap())
             .unwrap(),
-        serde_json::to_string(&vec![181; 32]).unwrap()
     )
 }
 
@@ -606,35 +618,39 @@ fn explicit_api_settings_reject_ambiguous_fields_and_invalid_addresses() {
 
 #[test]
 fn snapshots_retain_both_nested_document_and_whole_snapshot_byte_bounds() {
-    for (nested, too_large) in [(false, false), (false, true), (true, false), (true, true)] {
-        let directory = Directory::new();
-        let store = ManagementStore::initialize(&directory.state()).unwrap();
-        let input = if nested {
+    let expected = ManagementDocument::from_json(LITERAL_DOCUMENT).unwrap();
+    let envelope_limit = MAX_MANAGEMENT_BYTES + 4096;
+    for configured in [false, true] {
+        let check = |input: &[u8], accepted| {
+            let directory = Directory::new();
+            let store = ManagementStore::initialize(&directory.state()).unwrap();
+            private_file(&directory.state().join("state.json"), input);
+            if accepted {
+                assert_state(
+                    &store.load().unwrap().unwrap(),
+                    &expected,
+                    configured,
+                    false,
+                );
+            } else {
+                assert!(matches!(store.load(), Err(StoreError::InvalidState)));
+            }
+        };
+        for (extra, accepted) in [(0, true), (1, false)] {
+            let mut envelope = literal_snapshot(LITERAL_DOCUMENT, configured).into_bytes();
+            envelope.resize(envelope_limit + extra, b' ');
+            check(&envelope, accepted);
+
             let mut document = LITERAL_DOCUMENT.strip_suffix('}').unwrap().to_owned();
             document.extend(std::iter::repeat_n(
                 ' ',
-                MAX_MANAGEMENT_BYTES + usize::from(too_large) - document.len() - 1,
+                MAX_MANAGEMENT_BYTES + extra - document.len() - 1,
             ));
             document.push('}');
-            literal().replace(LITERAL_DOCUMENT, &document)
-        } else {
-            let mut input = literal();
-            input.extend(std::iter::repeat_n(
-                ' ',
-                MAX_MANAGEMENT_BYTES + 4096 + usize::from(too_large) - input.len(),
-            ));
-            input
-        };
-        private_file(&directory.state().join("state.json"), input.as_bytes());
-        if too_large {
-            assert!(matches!(store.load(), Err(StoreError::InvalidState)));
-        } else {
-            assert_state(
-                &store.load().unwrap().unwrap(),
-                &ManagementDocument::from_json(LITERAL_DOCUMENT).unwrap(),
-                true,
-                false,
-            );
+            assert_eq!(document.len(), MAX_MANAGEMENT_BYTES + extra);
+            let envelope = literal_snapshot(&document, configured);
+            assert!(envelope.len() < envelope_limit);
+            check(envelope.as_bytes(), accepted);
         }
     }
 }

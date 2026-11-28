@@ -88,19 +88,20 @@ fn enrollment_help_exposes_only_the_invitation_workflow() {
         .unwrap();
     assert!(result.status.success());
     let help = String::from_utf8(result.stdout).unwrap();
-    let flags: Vec<_> = help
+    let mut flags: Vec<_> = help
         .lines()
         .filter_map(|line| line.strip_prefix("  --"))
         .map(|arg| arg.split_whitespace().next().unwrap())
         .collect();
+    flags.sort_unstable();
     assert_eq!(
         flags,
         [
-            "traffic",
-            "revision",
+            "credential-file",
             "profile",
+            "revision",
             "socket",
-            "credential-file"
+            "traffic"
         ]
     );
 }
@@ -121,17 +122,18 @@ fn detailed_help_is_available_without_state_or_services() {
         (
             env!("CARGO_BIN_EXE_wgfeel"),
             vec!["init", "--help"],
-            vec!["--listen", "--endpoint", "administrator profile"],
+            vec![
+                "--listen",
+                "--endpoint",
+                "administrator profile",
+                "--control main|child",
+                "wgfeel join",
+            ],
         ),
         (
             env!("CARGO_BIN_EXE_wgfeel"),
             vec!["join", "--help"],
             vec!["INVITATION", "--endpoint", "--install-dir"],
-        ),
-        (
-            env!("CARGO_BIN_EXE_wgfeel"),
-            vec!["init", "--help"],
-            vec!["--control main|child", "wgfeel join"],
         ),
     ] {
         let output = Command::new(binary).args(args).output().unwrap();

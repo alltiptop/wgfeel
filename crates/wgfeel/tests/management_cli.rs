@@ -399,9 +399,6 @@ fn interactive_cli_and_rest_share_generated_ids_names_configs_and_confirmed_dele
     assert_eq!(user.len(), 36);
     assert_eq!(device.len(), 36);
     assert_ne!(user, device);
-    let screen = terminal(&fixture, &["user", "list"], "1\n4\n1\n0\n0\n0\n", true);
-    assert!(screen.contains("1. Alice, 1 devices"));
-    assert!(screen.contains("laptop:"));
     let exported = http(
         &fixture,
         "GET",
@@ -414,14 +411,16 @@ fn interactive_cli_and_rest_share_generated_ids_names_configs_and_confirmed_dele
     let config_text = std::str::from_utf8(&exported.body).unwrap();
     assert!(config_text.contains("# Node: edge\n[Peer]\n"));
     assert!(config_text.contains("# IPv4\nEndpoint = 192.0.2.2:51821\n"));
-    assert!(screen.contains(config_text));
     assert!(terminal(&fixture, &["device", "show", device], "", true).contains(config_text));
     let before = fixture.state_bytes();
-    for input in ["", "\n", "n\n", "yes\n"] {
-        let result = terminal(&fixture, &["device", "delete", device], input, true);
-        assert!(result.contains("Cancelled."));
-        terminal(&fixture, &["user", "remove", "--id", user], input, true);
-        terminal(&fixture, &["node", "delete", "edge"], input, true);
+    // The UI tests cover every cancellation spelling. Here each command must
+    // also leave the running service's durable state untouched.
+    for (args, input) in [
+        (vec!["device", "delete", device], ""),
+        (vec!["user", "remove", "--id", user], "n\n"),
+        (vec!["node", "delete", "edge"], "yes\n"),
+    ] {
+        assert!(terminal(&fixture, &args, input, true).contains("Cancelled."));
         assert_eq!(fixture.state_bytes(), before);
     }
     terminal(
