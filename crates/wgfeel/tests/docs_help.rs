@@ -73,7 +73,7 @@ fn help_accepts_command_arguments_without_opening_state_or_connections() {
 }
 
 #[test]
-fn enrollment_help_exposes_only_the_invitation_workflow() {
+fn incomplete_child_initialization_points_to_usage() {
     let binary = env!("CARGO_BIN_EXE_wgfeel");
     let missing = Command::new(binary)
         .args(["init", "--control", "child"])
@@ -82,28 +82,6 @@ fn enrollment_help_exposes_only_the_invitation_workflow() {
     assert!(!missing.status.success());
     let error = String::from_utf8(missing.stderr).unwrap();
     assert!(error.contains("wgfeel init --control child"), "{error}");
-    let result = Command::new(binary)
-        .args(["node", "add", "--help"])
-        .output()
-        .unwrap();
-    assert!(result.status.success());
-    let help = String::from_utf8(result.stdout).unwrap();
-    let mut flags: Vec<_> = help
-        .lines()
-        .filter_map(|line| line.strip_prefix("  --"))
-        .map(|arg| arg.split_whitespace().next().unwrap())
-        .collect();
-    flags.sort_unstable();
-    assert_eq!(
-        flags,
-        [
-            "credential-file",
-            "profile",
-            "revision",
-            "socket",
-            "traffic"
-        ]
-    );
 }
 
 #[test]

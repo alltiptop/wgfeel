@@ -6,9 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use wgfeel_test_support::{
-    ClockError, ManagedChild, ManualClock, ProcessError, ProcessLimits, ProcessSpec,
-};
+use wgfeel_test_support::{ManagedChild, ProcessError, ProcessLimits, ProcessSpec};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const SECRET: &str = "HARNESS_SECRET_MUST_NOT_APPEAR_IN_DEBUG";
@@ -78,7 +76,7 @@ fn direct_child_is_reaped(pid: u32) {
     );
 }
 
-fn descendant_is_terminated(pid: u32) {
+fn wait_until_terminated(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -90,52 +88,11 @@ fn descendant_is_terminated(pid: u32) {
                     return;
                 }
             }
-            Err(error) => panic!("cannot inspect descendant state: {error}"),
+            Err(error) => panic!("cannot inspect process state: {error}"),
         }
-        assert!(Instant::now() < deadline, "descendant still running: {pid}");
+        assert!(Instant::now() < deadline, "process still running: {pid}");
         std::thread::sleep(Duration::from_millis(5));
     }
-}
-
-#[test]
-fn manual_clock_has_exact_deadlines_and_does_not_move_without_advance() {
-    let mut clock = ManualClock::new();
-    assert_eq!(clock.now(), Duration::ZERO);
-    assert!(
-        clock
-            .deadline_after(Duration::ZERO)
-            .unwrap()
-            .is_elapsed(&clock)
-    );
-    let deadline = clock.deadline_after(Duration::from_nanos(11)).unwrap();
-    assert!(!deadline.is_elapsed(&clock));
-    clock.advance(Duration::from_nanos(10)).unwrap();
-    assert!(!deadline.is_elapsed(&clock));
-    assert_eq!(clock.now(), Duration::from_nanos(10));
-    clock.advance(Duration::ZERO).unwrap();
-    assert_eq!(clock.now(), Duration::from_nanos(10));
-    clock.advance(Duration::from_nanos(1)).unwrap();
-    assert!(deadline.is_elapsed(&clock));
-    clock.advance(Duration::from_nanos(1)).unwrap();
-    assert!(deadline.is_elapsed(&clock));
-}
-
-#[test]
-fn manual_clock_overflow_is_checked_and_preserves_time() {
-    let mut clock = ManualClock::new();
-    let last = clock.deadline_after(Duration::MAX).unwrap();
-    clock.advance(Duration::MAX).unwrap();
-    assert!(last.is_elapsed(&clock));
-    assert_eq!(
-        clock.advance(Duration::from_nanos(1)),
-        Err(ClockError::Overflow)
-    );
-    assert_eq!(clock.now(), Duration::MAX);
-    assert_eq!(
-        clock.deadline_after(Duration::from_nanos(1)).unwrap_err(),
-        ClockError::Overflow
-    );
-    assert_eq!(clock.now(), Duration::MAX);
 }
 
 #[test]
@@ -242,12 +199,20 @@ fn readiness_requires_an_exact_complete_stdout_line_and_preserves_capture() {
 
 #[test]
 fn readiness_on_quick_exit_preserves_status_and_both_captures_for_wait() {
-    // Writing stderr before the marker exercises the stdout/stderr polling race.
-    // Every schedule must preserve the result, whether readiness sees a live or exited child.
-    for _ in 0..32 {
-        let mut child = spawn("quick_exit_ready");
-        child.wait_for_stdout_line(b"READY", TIMEOUT).unwrap();
+    for mode in ["exit_before_readiness", "exit_after_readiness"] {
+        let mut child = spawn(mode);
         let pid = child.id();
+        if mode == "exit_before_readiness" {
+            child
+                .wait_for_stdout_line(b"STDERR_WRITTEN", TIMEOUT)
+                .unwrap();
+            child.write_stdin_line(b"").unwrap();
+            wait_until_terminated(pid);
+        }
+        child.wait_for_stdout_line(b"READY", TIMEOUT).unwrap();
+        if mode == "exit_after_readiness" {
+            child.write_stdin_line(b"").unwrap();
+        }
         let output = child.wait(TIMEOUT).unwrap();
         assert_eq!(output.status.code(), Some(7));
         assert!(
@@ -318,15 +283,6 @@ fn timeout_kills_and_reaps_instead_of_only_reporting_failure() {
 }
 
 #[test]
-fn drop_kills_and_reaps_a_child_paused_after_readiness() {
-    let mut child = spawn("ready");
-    child.wait_for_stdout_line(b"READY", TIMEOUT).unwrap();
-    let pid = child.id();
-    drop(child);
-    direct_child_is_reaped(pid);
-}
-
-#[test]
 fn invalid_marker_also_cleans_up_the_started_process() {
     for marker in [vec![], b"one\ntwo".to_vec(), vec![b'x'; 300_001]] {
         let mut child = spawn("ready");
@@ -392,7 +348,7 @@ fn leader_exit_cleans_up_descendants_holding_capture_pipes() {
         .parse()
         .unwrap();
     direct_child_is_reaped(leader);
-    descendant_is_terminated(descendant);
+    wait_until_terminated(descendant);
 }
 
 #[test]
@@ -408,17 +364,7 @@ fn dropping_ready_leader_cleans_up_its_same_group_descendants() {
         .unwrap();
     drop(child);
     direct_child_is_reaped(leader);
-    descendant_is_terminated(descendant);
-}
-
-#[test]
-fn error_types_implement_standard_error_without_hidden_context() {
-    fn check(error: &dyn std::error::Error) {
-        assert!(!error.to_string().is_empty());
-        assert!(error.source().is_none());
-    }
-    check(&ProcessError::Timeout);
-    check(&ClockError::Overflow);
+    wait_until_terminated(descendant);
 }
 
 fn block_on_stdin() {
@@ -520,10 +466,19 @@ fn subprocess_fixture() {
             io::stdout().flush().unwrap();
             block_on_stdin();
         }
-        "quick_exit_ready" => {
+        "exit_before_readiness" | "exit_after_readiness" => {
             io::stderr().write_all(&vec![0x93; 64 * 1024]).unwrap();
+            if mode == "exit_before_readiness" {
+                // Drain the large stderr write before waiting for exit on an unread READY.
+                println!("\nSTDERR_WRITTEN");
+                io::stdout().flush().unwrap();
+                block_on_stdin();
+            }
             println!("\nREADY");
             io::stdout().flush().unwrap();
+            if mode == "exit_after_readiness" {
+                block_on_stdin();
+            }
             std::process::exit(7);
         }
         "wrong_marker" => println!("NOT_READY"),

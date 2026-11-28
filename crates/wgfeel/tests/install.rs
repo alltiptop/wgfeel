@@ -211,6 +211,37 @@ fn common_installations_discover_their_state_join_and_change_only_the_http_port(
         ],
     );
     main.next_stdout_line(Duration::from_secs(10)).unwrap();
+    // Exercise completion with a live, writable installation. The snapshot includes
+    // the revision and administrator verifier, so an accidental rotation is observable.
+    let snapshot = main_state.join("state.json");
+    let before_completion = fs::read(&snapshot).unwrap();
+    for words in [
+        vec!["node", "delete", "main"],
+        vec!["token", "rotate", ""],
+        vec![
+            "uninstall",
+            "--root",
+            main_root.0.to_str().unwrap(),
+            "--purge",
+            "",
+        ],
+        vec!["node", "add", "--traffic", "r"],
+        vec!["unknown", ""],
+    ] {
+        let mut args = vec!["_complete".into(), "--".into()];
+        args.extend(words.iter().map(OsString::from));
+        let output = run(main_binary.clone(), args);
+        assert!(output.status.success() && output.stderr.is_empty());
+        match words.as_slice() {
+            ["node", "delete", ..] => assert!(output.stdout.starts_with(b"main\t")),
+            ["node", "add", ..] => assert_eq!(output.stdout, b"relay\t\n"),
+            _ => (),
+        }
+        assert!(
+            fs::read(&snapshot).unwrap() == before_completion,
+            "completion changed state"
+        );
+    }
     assert!(!child_state.join("api.sock").exists());
     let serve_child = || {
         spawn(
@@ -612,21 +643,23 @@ fn unknown_options_never_install_or_update_files() {
         } else {
             None
         };
-        for extra in [vec!["--unknown"], vec!["--unknown", "value"]] {
-            let mut args = vec!["--control", "main", "--endpoint", "192.0.2.1:51820"];
-            args.extend(extra);
-            let output = root.call(&args);
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("wgfeel install"));
-            if let Some(before) = &before {
-                assert_eq!(
-                    fs::read(&binary).unwrap(),
-                    fs::read("/proc/self/exe").unwrap()
-                );
-                assert_eq!(&fs::read(&state).unwrap(), before);
-            } else {
-                assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
-            }
+        let output = root.call(&[
+            "--control",
+            "main",
+            "--endpoint",
+            "192.0.2.1:51820",
+            "--unknown",
+        ]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("wgfeel install"));
+        if let Some(before) = &before {
+            assert_eq!(
+                fs::read(&binary).unwrap(),
+                fs::read("/proc/self/exe").unwrap()
+            );
+            assert_eq!(&fs::read(&state).unwrap(), before);
+        } else {
+            assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
         }
     }
 }

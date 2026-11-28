@@ -138,6 +138,14 @@ impl Fixture {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+    fn with_wrong_bearer(&self, check: impl FnOnce()) {
+        let profile = fs::read(self.profile()).unwrap();
+        let mut invalid: Value = serde_json::from_slice(&profile).unwrap();
+        invalid["credential"] = serde_json::json!([77; 32].to_vec());
+        fs::write(self.profile(), serde_json::to_vec(&invalid).unwrap()).unwrap();
+        check();
+        fs::write(self.profile(), profile).unwrap();
+    }
     fn remote(&self, args: &[&str], input: &str, success: bool) -> String {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
@@ -215,75 +223,90 @@ fn stop(child: ManagedChild) {
 
 #[test]
 fn remote_commands_share_durable_authority_across_restart_and_require_bearer() {
-    for traffic in ["entry", "relay", "off"] {
+    for traffic in ["relay", "off"] {
         let fixture = Fixture::new();
         fixture.initialize_with_traffic("127.0.0.1:0", Some(traffic));
-        let child = fixture.start(1);
-        let (gateway, endpoint) = fixture.start_child("gateway1");
-        fixture.join_child("gateway1", endpoint);
+        let main = fixture.start(1);
         assert!(
             fixture
-                .remote(&["user", "add", "Alice"], "Мой телефон\n0\n", true)
-                .contains("User added: Alice")
+                .remote(&["user", "list"], "", true)
+                .contains("No users.")
         );
-        let users = api::json(&fixture.state(), "GET", "/api/v1/users", Value::Null);
-        let user = users["users"][0]["id"].as_str().unwrap();
-        let device = users["users"][0]["devices"][0]["id"].as_str().unwrap();
-        assert_eq!(
-            fixture.remote(&["_complete", "2", "--", "user", "show", user], "", true),
-            format!("{user}\tAlice\n")
-        );
-        assert_eq!(
-            fixture.remote(
-                &["_complete", "2", "--", "device", "show", device],
+        fixture.with_wrong_bearer(|| {
+            assert!(
+                fixture
+                    .remote(&["user", "list"], "", false)
+                    .contains("unauthorized")
+            );
+        });
+        stop(main);
+    }
+
+    let fixture = Fixture::new();
+    fixture.initialize_with_traffic("127.0.0.1:0", Some("entry"));
+    let child = fixture.start(1);
+    let (gateway, endpoint) = fixture.start_child("gateway1");
+    fixture.join_child("gateway1", endpoint);
+    assert!(
+        fixture
+            .remote(&["user", "add", "Alice"], "Мой телефон\n0\n", true)
+            .contains("User added: Alice")
+    );
+    let users = api::json(&fixture.state(), "GET", "/api/v1/users", Value::Null);
+    let user = users["users"][0]["id"].as_str().unwrap();
+    let device = users["users"][0]["devices"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        fixture.remote(&["_complete", "2", "--", "user", "show", user], "", true),
+        format!("{user}\tAlice\n")
+    );
+    assert_eq!(
+        fixture.remote(
+            &["_complete", "2", "--", "device", "show", device],
+            "",
+            true
+        ),
+        format!("{device}\tAlice / Мой телефон\n")
+    );
+    assert!(
+        fixture
+            .remote(
+                &["_complete", "2", "--", "node", "show", "gateway"],
                 "",
                 true
-            ),
-            format!("{device}\tAlice / Мой телефон\n")
-        );
-        assert!(
-            fixture
-                .remote(
-                    &["_complete", "2", "--", "node", "show", "gateway"],
-                    "",
-                    true
-                )
-                .starts_with("gateway1\t")
-        );
-        let output = std::process::Command::new("bash")
-            .args([
-                "--noprofile",
-                "--norc",
-                "-c",
-                r#"source <("$1" completions bash)
+            )
+            .starts_with("gateway1\t")
+    );
+    let output = std::process::Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"source <("$1" completions bash)
 COMP_WORDS=("$1" device show "$3" --profile "$2")
 COMP_CWORD=3
 _wgfeel
 printf '%s\n' "${COMPREPLY[@]}"
 "#,
-                "completion-test",
-            ])
-            .arg(env!("CARGO_BIN_EXE_wgfeel"))
-            .arg(fixture.profile())
-            .arg(device)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
-        assert_eq!(output.stdout, format!("{device}\n").as_bytes());
-        let before = fixture.remote(&["device", "show", device], "", true);
-        assert!(before.contains("Мой телефон:"));
-        assert!(before.contains("[Interface]"));
-        stop(child);
-        let child = fixture.start(4);
-        assert_eq!(
-            fixture.remote(&["device", "show", device], "", true),
-            before
-        );
-        let profile = fs::read(fixture.profile()).unwrap();
-        let mut bad: Value = serde_json::from_slice(&profile).unwrap();
-        bad["credential"] = serde_json::json!([77; 32].to_vec());
-        fs::write(fixture.profile(), serde_json::to_vec(&bad).unwrap()).unwrap();
+            "completion-test",
+        ])
+        .arg(env!("CARGO_BIN_EXE_wgfeel"))
+        .arg(fixture.profile())
+        .arg(device)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, format!("{device}\n").as_bytes());
+    let before = fixture.remote(&["device", "show", device], "", true);
+    assert!(before.contains("Мой телефон:"));
+    assert!(before.contains("[Interface]"));
+    stop(child);
+    let child = fixture.start(4);
+    assert_eq!(
+        fixture.remote(&["device", "show", device], "", true),
+        before
+    );
+    fixture.with_wrong_bearer(|| {
         assert_eq!(
             fixture.remote(&["_complete", "2", "--", "user", "show", user], "", true),
             ""
@@ -293,27 +316,26 @@ printf '%s\n' "${COMPREPLY[@]}"
                 .remote(&["user", "remove", "--id", user], "y\n", false)
                 .contains("unauthorized")
         );
-        fs::write(fixture.profile(), profile).unwrap();
-        assert_eq!(
-            api::json(&fixture.state(), "GET", "/api/v1/users", Value::Null),
-            users
-        );
-        fixture.remote(&["device", "delete", device], "y\n", true);
-        fixture.remote(&["user", "remove", "--id", user], "y\n", true);
-        fixture.remote(&["node", "delete", "gateway1"], "y\n", true);
-        stop(gateway);
-        stop(child);
-        let child = fixture.start(7);
-        assert!(
-            fixture
-                .remote(&["user", "list"], "", true)
-                .contains("No users.")
-        );
-        let nodes = api::json(&fixture.state(), "GET", "/api/v1/gateways", Value::Null);
-        assert_eq!(nodes["gateways"].as_array().unwrap().len(), 1);
-        assert_eq!(nodes["gateways"][0]["recipient"], "management");
-        stop(child);
-    }
+    });
+    assert_eq!(
+        api::json(&fixture.state(), "GET", "/api/v1/users", Value::Null),
+        users
+    );
+    fixture.remote(&["device", "delete", device], "y\n", true);
+    fixture.remote(&["user", "remove", "--id", user], "y\n", true);
+    fixture.remote(&["node", "delete", "gateway1"], "y\n", true);
+    stop(gateway);
+    stop(child);
+    let child = fixture.start(7);
+    assert!(
+        fixture
+            .remote(&["user", "list"], "", true)
+            .contains("No users.")
+    );
+    let nodes = api::json(&fixture.state(), "GET", "/api/v1/gateways", Value::Null);
+    assert_eq!(nodes["gateways"].as_array().unwrap().len(), 1);
+    assert_eq!(nodes["gateways"][0]["recipient"], "management");
+    stop(child);
 }
 
 #[test]

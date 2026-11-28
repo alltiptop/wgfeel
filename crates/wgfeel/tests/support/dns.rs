@@ -89,6 +89,14 @@ fn udp_answer(peer: &mut Peer, address: SocketAddr, name: &str, ipv6: bool) -> M
     let len = usize::from(u16::from_be_bytes([bytes[offset + 4], bytes[offset + 5]]));
     let reply = Message::from_vec(&bytes[offset + 8..offset + len]).unwrap();
     assert_eq!(reply.metadata.id, 121);
+    assert!(
+        reply
+            .authorities
+            .iter()
+            .chain(&reply.additionals)
+            .all(|record| !matches!(record.data, RData::A(_) | RData::AAAA(_))),
+        "unexpected address outside the answer section"
+    );
     reply
 }
 
@@ -111,17 +119,22 @@ fn encrypted_dns_is_tenant_scoped_source_bound_and_survives_restart_without_mana
                 } else {
                     RData::A(A(format!("10.1.0.{host}").parse().unwrap()))
                 };
+                assert_eq!(reply.answers.len(), 1, "unexpected records for {host}");
                 assert_eq!(reply.answers[0].data, expected);
                 let external = udp_answer(peer, address, "example.org.", ipv6);
                 assert_eq!(external.metadata.response_code, ResponseCode::Refused);
+                assert!(external.answers.is_empty());
                 assert!(!external.metadata.recursion_available);
             }
         }
         // Alice's ACL denies her second device. Bob's second device is visible only in Bob's context.
-        let reply = udp_answer(&mut alice, address, "other.feel.internal.", false);
-        assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
-        let reply = udp_answer(&mut alice, address, "missing.feel.internal.", false);
-        assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
+        for name in ["other.feel.internal.", "missing.feel.internal."] {
+            for ipv6 in [false, true] {
+                let reply = udp_answer(&mut alice, address, name, ipv6);
+                assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
+                assert!(reply.answers.is_empty());
+            }
+        }
         alice.send(address, &udp("pc.feel.internal.", false, 2));
         alice.no_datagram(Duration::from_millis(100));
         bob.no_datagram(Duration::from_millis(100));

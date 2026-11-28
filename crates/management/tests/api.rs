@@ -597,64 +597,85 @@ fn authenticated_reads_are_public_exact_and_do_not_mutate_the_snapshot() {
     assert_eq!(fixture.bytes(), before);
 }
 
+const PUBLIC_ROUTES: &[(&str, &str)] = &[
+    ("openapi.json", "GET"),
+    ("identity", "GET"),
+    ("config", "GET"),
+    ("distribution", "GET"),
+    ("users", "GET POST"),
+    ("users/{user}", "DELETE GET"),
+    ("users/{user}/broadcast", "GET PUT"),
+    ("users/{user}/devices/{device}/broadcast", "GET PUT"),
+    ("users/{user}/suspend", "POST"),
+    ("users/{user}/resume", "POST"),
+    ("users/{user}/devices", "GET POST"),
+    ("users/{user}/devices/{device}", "DELETE GET"),
+    ("users/{user}/devices/{device}/config", "GET"),
+    ("users/{user}/devices/{device}/config/{network}", "GET"),
+    ("egresses", "GET POST"),
+    ("egresses/{egress}", "DELETE GET PUT"),
+    ("egresses/{egress}/node", "GET PUT"),
+    ("users/{user}/egresses", "GET PUT"),
+    ("users/{user}/egresses/{egress}", "DELETE PUT"),
+    ("gateways", "GET POST"),
+    ("gateways/{gateway}", "DELETE GET"),
+    ("node-invitations", "POST"),
+    ("token/rotate", "POST"),
+];
+
 #[test]
 fn every_route_requires_the_retained_bearer_before_any_mutation() {
     let fixture = Fixture::new();
     let before = fixture.bytes();
     let mut service = fixture.service();
-    let routes = [
-        ("GET", "/api/v1/config", b"".as_slice()),
-        ("GET", "/api/v1/egresses", b""),
-        ("GET", "/api/v1/egresses/office", b""),
-        ("POST", "/api/v1/egresses", b"{}"),
-        ("DELETE", "/api/v1/egresses/office", b""),
-        ("PUT", "/api/v1/egresses/office", b"{}"),
-        ("GET", "/api/v1/egresses/office/node", b""),
-        ("PUT", "/api/v1/egresses/office/node", b"{}"),
-        ("GET", "/api/v1/users/alice/egresses", b""),
-        ("PUT", "/api/v1/users/alice/egresses", b"{}"),
-        ("PUT", "/api/v1/users/alice/egresses/office", b"{}"),
-        ("DELETE", "/api/v1/users/alice/egresses/office", b""),
-        ("POST", "/api/v1/token/rotate", b""),
-        ("GET", "/api/v1/users", b""),
-        ("GET", "/api/v1/users/alice", b""),
-        ("GET", "/api/v1/users/alice/devices", b""),
-        ("GET", "/api/v1/gateways", b""),
-        ("GET", "/api/v1/gateways/gateway-one", b""),
-        ("POST", "/api/v1/users", br#"{"id":"new"}"#),
-        ("DELETE", "/api/v1/users/alice", b""),
-        ("POST", "/api/v1/users/alice/devices", b"{}"),
-        ("DELETE", "/api/v1/users/alice/devices/shared", b""),
-        ("POST", "/api/v1/gateways", b"{}"),
-        ("DELETE", "/api/v1/gateways/gateway-one", b""),
-    ];
-    let invalid = [
-        None,
-        Some("Bearer NEVER_ECHO_INPUT".to_owned()),
-        Some(bearer(212)),
-        Some(STANDARD.encode([211; 32])),
-        Some(format!("Bearer {}", STANDARD.encode([211; 31]))),
-        Some(format!(
-            "Bearer {}",
-            STANDARD.encode([211; 32]).trim_end_matches('=')
-        )),
-    ];
-    for (method, target, body) in routes {
-        for token in &invalid {
-            error(
-                &request(
-                    &mut service,
-                    method,
-                    target,
-                    token.as_deref(),
-                    Some("\"7\""),
-                    body,
-                ),
-                401,
-            );
-            assert_eq!(fixture.bytes(), before);
+    let wrong_token = bearer(212);
+    for &(route, methods) in PUBLIC_ROUTES {
+        let path = format!("/api/v1/{route}")
+            .replace("{user}", "alice")
+            .replace("{device}", "shared")
+            .replace("{network}", "alpha")
+            .replace("{gateway}", "gateway-one")
+            .replace("{egress}", "office");
+        for method in methods.split_whitespace() {
+            for token in [None, Some(wrong_token.as_str())] {
+                let response = request(&mut service, method, &path, token, Some("\"7\""), b"");
+                assert_eq!(response.status, 401, "{method} {path}");
+                error(&response, 401);
+            }
+            // An unknown route also rejects anonymous requests. Prove that this
+            // method reaches its own validation with a valid bearer, without writing.
+            let (revision, body, status) = if method == "GET" {
+                (None, b"{}".as_slice(), 400)
+            } else {
+                (Some(6), b"".as_slice(), 412)
+            };
+            let response = authorized(&mut service, method, &path, revision, body);
+            assert_eq!(response.status, status, "{method} {path}");
         }
     }
+    for invalid in [
+        "Bearer NEVER_ECHO_INPUT".to_owned(),
+        STANDARD.encode([211; 32]),
+        format!("Bearer {}", STANDARD.encode([211; 31])),
+        format!(
+            "Bearer {}",
+            STANDARD.encode([211; 32]).trim_end_matches('=')
+        ),
+    ] {
+        let response = request(
+            &mut service,
+            "GET",
+            "/api/v1/config",
+            Some(&invalid),
+            None,
+            b"",
+        );
+        error(&response, 401);
+    }
+    assert!(
+        fixture.bytes() == before,
+        "unauthorized or rejected request changed state"
+    );
     assert_eq!(document(&mut service), initial());
 }
 
@@ -1243,44 +1264,32 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
     assert_eq!((response.status, response.generation), (200, Some(7)));
     let api: Value = serde_json::from_slice(&response.body).unwrap();
     let paths = api["paths"].as_object().unwrap();
-    let expected = [
-        ("openapi.json", "get"),
-        ("identity", "get"),
-        ("config", "get"),
-        ("distribution", "get"),
-        ("users", "get post"),
-        ("users/{user}", "delete get"),
-        ("users/{user}/broadcast", "get put"),
-        ("users/{user}/devices/{device}/broadcast", "get put"),
-        ("users/{user}/suspend", "post"),
-        ("users/{user}/resume", "post"),
-        ("users/{user}/devices", "get post"),
-        ("users/{user}/devices/{device}", "delete get"),
-        ("users/{user}/devices/{device}/config", "get"),
-        ("users/{user}/devices/{device}/config/{network}", "get"),
-        ("egresses", "get post"),
-        ("egresses/{egress}", "delete get put"),
-        ("egresses/{egress}/node", "get put"),
-        ("users/{user}/egresses", "get put"),
-        ("users/{user}/egresses/{egress}", "delete put"),
-        ("gateways", "get post"),
-        ("gateways/{gateway}", "delete get"),
-        ("node-invitations", "post"),
-        ("token/rotate", "post"),
-    ];
-    for (target, methods) in expected {
-        let operations = paths[&format!("/api/v1/{target}")].as_object().unwrap();
+    assert_eq!(api["security"], json!([{"adminBearer": []}]));
+    let bearer = &api["components"]["securitySchemes"]["adminBearer"];
+    assert_eq!(bearer["type"], "http");
+    assert_eq!(bearer["scheme"], "bearer");
+    assert_eq!(paths.len(), PUBLIC_ROUTES.len());
+    for &(route, methods) in PUBLIC_ROUTES {
+        let operations = paths[&format!("/api/v1/{route}")].as_object().unwrap();
+        assert_eq!(
+            operations
+                .keys()
+                .filter(|name| matches!(
+                    name.as_str(),
+                    "get" | "put" | "post" | "delete" | "options" | "head" | "patch" | "trace"
+                ))
+                .count(),
+            methods.split_whitespace().count(),
+            "{route}"
+        );
         for method in methods.split_whitespace() {
-            assert!(operations.contains_key(method), "missing {method} {target}");
-        }
-    }
-    for (path, item) in paths {
-        assert!(path.starts_with("/api/v1/"));
-        for operation in item.as_object().unwrap().values() {
-            assert!(!operation["summary"].as_str().unwrap().is_empty());
-            assert!(
-                operation.get("security").is_none(),
-                "must inherit bearer authentication"
+            let operation = operations
+                .get(&method.to_ascii_lowercase())
+                .unwrap_or_else(|| panic!("missing {method} {route}"));
+            assert_eq!(
+                operation.get("security").unwrap_or(&api["security"]),
+                &api["security"],
+                "{method} {route} must require a bearer"
             );
         }
     }
@@ -1310,12 +1319,16 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
         }
     }
     check_local_refs(&api, &api);
-    assert!(
-        paths[path]["get"]["description"]
-            .as_str()
+    let if_match = |operation: &Value| {
+        operation["parameters"]
+            .as_array()
             .unwrap()
-            .contains("bearer token")
-    );
+            .iter()
+            .find(|p| p["name"] == "If-Match" && p["in"] == "header")
+            .expect("If-Match header missing")["required"]
+            .as_bool()
+            .unwrap()
+    };
 
     let schema = &paths["/api/v1/users/{user}/devices/{device}/broadcast"]["put"]["requestBody"]["content"]
         ["application/json"]["schema"];
@@ -1329,19 +1342,12 @@ fn openapi_contract_covers_public_operations_and_preserves_wire_types() {
     assert_eq!(input["required"], json!(["name"]));
     assert_eq!(input["additionalProperties"], false);
     assert_eq!(input["properties"]["name"]["type"], "string");
-    assert!(
-        input["properties"]["name"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Display name")
-    );
-    assert_eq!(post["parameters"][0]["name"], "If-Match");
-    assert_eq!(post["parameters"][0]["required"], true);
+    assert!(if_match(post));
     assert!(post["responses"]["201"]["headers"]["ETag"].is_object());
     assert!(post["responses"]["412"].is_object());
     assert!(post["responses"]["428"].is_object());
     let invitation = &paths["/api/v1/node-invitations"]["post"];
-    assert_eq!(invitation["parameters"][0]["required"], false);
+    assert!(!if_match(invitation));
     assert_eq!(invitation["requestBody"]["required"], false);
     let traffic = &invitation["requestBody"]["content"]["application/json"]["schema"]["properties"]
         ["traffic"];

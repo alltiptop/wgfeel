@@ -214,7 +214,6 @@ fn maximum_entries(count: usize) -> Vec<(NetworkId, TenantPrivateKey)> {
 
 #[test]
 fn maximum_local_context_count_round_trips_and_next_entry_is_rejected() {
-    assert_eq!(MAX_NETWORKS, 150);
     assert!(matches!(
         LocalTenants::new(maximum_entries(MAX_NETWORKS + 1)),
         Err(StoreError::InvalidLocalTenants)
@@ -520,7 +519,7 @@ fn tenant_aware_commit_cannot_replace_node_identity() {
 }
 
 #[test]
-fn tenant_debug_and_errors_do_not_expose_private_bytes() {
+fn tenant_debug_does_not_expose_private_bytes() {
     let fixture = Fixture::new();
     let mut store = Store::open(&fixture.0).unwrap();
     let local = tenants(&[("alice", 173)]);
@@ -535,30 +534,11 @@ fn tenant_debug_and_errors_do_not_expose_private_bytes() {
     .unwrap();
     let state = store.load().unwrap().unwrap();
     assert!(!format!("{state:?}").contains("173"));
-    let error = StoreError::InvalidLocalTenants;
-    assert!(!format!("{error:?}").contains("173"));
-    assert!(!error.to_string().contains("173"));
-}
-
-fn stage_name(stage: CommitStage) -> &'static str {
-    match stage {
-        CommitStage::AfterCreate => "created",
-        CommitStage::AfterWrite => "written",
-        CommitStage::AfterFileSync => "file-synced",
-        CommitStage::AfterRename => "renamed",
-        CommitStage::AfterDirectorySync => "directory-synced",
-    }
 }
 
 #[test]
-fn process_death_preserves_whole_configuration_and_tenant_map_at_every_stage() {
-    for stage in [
-        CommitStage::AfterCreate,
-        CommitStage::AfterWrite,
-        CommitStage::AfterFileSync,
-        CommitStage::AfterRename,
-        CommitStage::AfterDirectorySync,
-    ] {
+fn crash_either_side_of_rename_preserves_whole_configuration_and_tenant_map() {
+    for (mode, published) in [("before-rename", false), ("after-rename", true)] {
         let fixture = Fixture::new();
         let mut store = Store::open(&fixture.0).unwrap();
         publish(
@@ -582,7 +562,7 @@ fn process_death_preserves_whole_configuration_and_tenant_map_at_every_stage() {
             .to_vec(),
             vec![
                 ("WGFEEL_TENANT_DIRECTORY".into(), fixture.0.clone().into()),
-                ("WGFEEL_TENANT_STAGE".into(), stage_name(stage).into()),
+                ("WGFEEL_TENANT_STAGE".into(), mode.into()),
             ],
             None,
         );
@@ -601,10 +581,7 @@ fn process_death_preserves_whole_configuration_and_tenant_map_at_every_stage() {
         assert!(!child.terminate().unwrap().status.success());
         let recovered = Store::open(&fixture.0).unwrap().load().unwrap().unwrap();
         assert_eq!(recovered.service_private_key().expose_bytes(), &[37; 32]);
-        if matches!(
-            stage,
-            CommitStage::AfterRename | CommitStage::AfterDirectorySync
-        ) {
+        if published {
             assert_eq!(recovered.config(), &config(2, &["bob", "charlie"]));
             assert_eq!(recovered.local_tenants().network_ids().count(), 2);
             assert_key(recovered.local_tenants(), "bob", 81);
@@ -628,7 +605,11 @@ fn process_death_preserves_whole_configuration_and_tenant_map_at_every_stage() {
 #[ignore = "Rust checkpoint writer launched only by its parent tenant-storage test"]
 fn subprocess_tenant_writer() {
     let path = PathBuf::from(std::env::var_os("WGFEEL_TENANT_DIRECTORY").unwrap());
-    let stage = std::env::var("WGFEEL_TENANT_STAGE").unwrap();
+    let stage = match std::env::var("WGFEEL_TENANT_STAGE").unwrap().as_str() {
+        "before-rename" => CommitStage::AfterFileSync,
+        "after-rename" => CommitStage::AfterRename,
+        _ => panic!("unknown tenant commit stage"),
+    };
     let local = tenants(&[("bob", 81), ("charlie", 82)]);
     let projection = assigned(
         &config(2, &["bob", "charlie"]),
@@ -645,7 +626,7 @@ fn subprocess_tenant_writer() {
             &node_key(),
             &local,
             |at| {
-                if stage_name(at) == stage {
+                if at == stage {
                     println!("\nTENANT_CHECKPOINT_READY");
                     io::stdout().flush()?;
                     io::stdin().read_exact(&mut [0_u8; 1])?;

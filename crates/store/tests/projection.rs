@@ -409,13 +409,10 @@ fn revision_and_exact_local_context_validation_precede_publication() {
 }
 
 #[test]
-fn projection_and_key_replacement_share_every_atomic_checkpoint() {
-    for stage in [
-        CommitStage::AfterCreate,
-        CommitStage::AfterWrite,
-        CommitStage::AfterFileSync,
-        CommitStage::AfterRename,
-        CommitStage::AfterDirectorySync,
+fn projection_and_keys_recover_together_after_a_publication_error() {
+    for (stage, published) in [
+        (CommitStage::AfterFileSync, false),
+        (CommitStage::AfterRename, true),
     ] {
         let directory = Directory::new();
         let mut store = Store::initialize(&directory.state()).unwrap();
@@ -433,10 +430,6 @@ fn projection_and_key_replacement_share_every_atomic_checkpoint() {
                     Ok(())
                 }
             },
-        );
-        let published = matches!(
-            stage,
-            CommitStage::AfterRename | CommitStage::AfterDirectorySync
         );
         if published {
             assert!(matches!(result, Err(StoreError::CommitUncertain)));

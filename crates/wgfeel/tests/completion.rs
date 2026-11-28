@@ -353,8 +353,7 @@ fn static_completion_selects_commands_flags_and_capability_values() {
     let root = complete(&[""]);
     assert!(root.lines().any(|line| line.starts_with("user\t")));
     assert!(!root.contains("_complete"));
-    let node = complete(&[""]);
-    assert!(node.lines().any(|line| line.starts_with("join\t")));
+    assert!(root.lines().any(|line| line.starts_with("join\t")));
     assert!(complete(&["device", "add", "--u"]).starts_with("--user\t"));
     assert_eq!(
         complete(&["user", "broadcast", "set", "u1", "o"]),
@@ -384,16 +383,4 @@ fn static_completion_selects_commands_flags_and_capability_values() {
     assert!(complete(&["device", "add", "--name", ""]).is_empty());
     assert!(complete(&["token", "rotate", "--p"]).is_empty());
     assert_eq!(complete(&["user", "--profile", ""]), "@files\t\n");
-}
-
-#[test]
-fn completion_never_dispatches_the_command_being_completed() {
-    for words in [
-        vec!["token", "rotate", ""],
-        vec!["uninstall", "--purge", ""],
-        vec!["node", "add", "--traffic", ""],
-        vec!["unknown", ""],
-    ] {
-        let _ = complete(&words);
-    }
 }
