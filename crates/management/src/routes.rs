@@ -223,13 +223,13 @@ routes! {
         Suspension resume_user(user; EmptyObject) -> ChangeReceipt, errors(404, 409, 422);
     }
     ["users", {user}, "devices"] {
-        /// List the user's device IDs and metadata.
+        /// List the user's device IDs, addresses and metadata.
         Read list_devices(user) -> Devices<'_>, errors(404);
         /// Provision a device in the user's network.
         Create create_device(user; AddDevice) -> ChangeReceipt, errors(404, 409, 422);
     }
     ["users", {user}, "devices", {device}] {
-        /// Get the device ID and metadata.
+        /// Get the device ID, addresses and metadata.
         Read get_device(user, device) -> DeviceView<'_>, errors(404);
         /// Remove this device from the user's network.
         Delete delete_device(user, device) -> ChangeReceipt, errors(404, 409, 422);

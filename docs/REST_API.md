@@ -129,7 +129,8 @@ to inherit. PUT requires the `broadcast` key and the current `If-Match`.
 A repeated stored value preserves the revision. Changing an explicit value to
 inherit changes the revision even if the effective policy stays the same.
 
-A device view includes `registration` with `broadcast` and `effective_broadcast`.
+A device view includes `addresses` (tunnel IP addresses, empty for catalog-only
+devices) and `registration` with `broadcast` and `effective_broadcast`.
 A catalog-only device has `registration: null` and its broadcast subresource
 returns HTTP 409 with `device_unassigned`.
 

@@ -426,7 +426,12 @@ fn sibling_signal_is_denied() {
     );
 }
 
-fn main() {
+fn probe_with_neighbor(mode: &str, installed: bool) {
+    let directory = FixtureDirectory::new();
+    successful_probe(mode, &[directory.neighbor().into_os_string()], installed);
+}
+
+fn main() -> std::process::ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     if arguments.first().is_some_and(|arg| arg == "--worker") {
         let result =
@@ -435,7 +440,7 @@ fn main() {
             println!("FAIL");
             std::process::exit(1);
         }
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     assert!(
         !arguments.iter().any(|arg| arg == "--escape"),
@@ -443,62 +448,45 @@ fn main() {
     );
     fn is_error<T: std::error::Error>() {}
     is_error::<SandboxError>();
-    let directory = FixtureDirectory::new();
-    let fixture = [directory.neighbor().into_os_string()];
-    let cases: &[(&str, &dyn Fn())] = &[
-        ("allowed_runtime_and_fresh_wireguard", &|| {
+    let cases: &[(&str, fn())] = &[
+        ("allowed_runtime_and_fresh_wireguard", || {
             successful_probe("allowed-runtime", &[], true)
         }),
         (
             "installed_kernel_limits",
-            &limits_are_visible_only_after_ready,
+            limits_are_visible_only_after_ready,
         ),
-        ("neighbor_file_open_is_denied", &|| {
-            successful_probe("deny-file", &fixture, true)
+        ("neighbor_file_open_is_denied", || {
+            probe_with_neighbor("deny-file", true)
         }),
-        ("socket_creation_is_denied", &|| {
+        ("socket_creation_is_denied", || {
             successful_probe("deny-socket", &[], true)
         }),
-        ("sibling_signal_is_denied", &sibling_signal_is_denied),
-        ("thread_creation_is_denied", &|| {
+        ("sibling_signal_is_denied", sibling_signal_is_denied),
+        ("thread_creation_is_denied", || {
             successful_probe("deny-thread", &[], true)
         }),
-        ("exec_is_denied", &|| {
+        ("exec_is_denied", || {
             successful_probe("deny-exec", &[], true)
         }),
-        ("stderr_is_not_a_data_channel", &|| {
+        ("stderr_is_not_a_data_channel", || {
             successful_probe("deny-stderr", &[], true)
         }),
-        ("invalid_limits_leave_process_unchanged", &|| {
-            successful_probe("invalid-limits", &fixture, false)
+        ("invalid_limits_leave_process_unchanged", || {
+            probe_with_neighbor("invalid-limits", false)
         }),
-        ("nonempty_environment_leaves_process_unchanged", &|| {
-            successful_probe("nonempty-environment", &fixture, false)
+        ("nonempty_environment_leaves_process_unchanged", || {
+            probe_with_neighbor("nonempty-environment", false)
         }),
-        ("missing_pipe_leaves_process_unchanged", &|| {
-            successful_probe("missing-pipe", &fixture, false)
+        ("missing_pipe_leaves_process_unchanged", || {
+            probe_with_neighbor("missing-pipe", false)
         }),
-        ("extra_descriptor_leaves_process_unchanged", &|| {
-            successful_probe("extra-descriptor", &fixture, false)
+        ("extra_descriptor_leaves_process_unchanged", || {
+            probe_with_neighbor("extra-descriptor", false)
         }),
-        ("multiple_threads_leave_process_unchanged", &|| {
-            successful_probe("multiple-threads", &fixture, false)
+        ("multiple_threads_leave_process_unchanged", || {
+            probe_with_neighbor("multiple-threads", false)
         }),
     ];
-    let mut failed = 0;
-    for (name, case) in cases {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(case)).is_ok() {
-            println!("test {name} ... ok");
-        } else {
-            failed += 1;
-            println!("test {name} ... FAILED");
-        }
-    }
-    println!(
-        "confinement result: {} passed; {failed} failed",
-        cases.len() - failed
-    );
-    if failed != 0 {
-        std::process::exit(1);
-    }
+    wgfeel_test_support::runner::run(&arguments, cases)
 }

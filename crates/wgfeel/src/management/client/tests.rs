@@ -226,7 +226,8 @@ fn installed_menus_generate_ids_show_native_config_and_confirm_every_deletion() 
         .ui(&["user", "list"], "1\n4\n1\n0\n0\n0\n")
         .unwrap();
     assert!(screen.contains("1. Alice, 1 devices"));
-    assert!(screen.contains("1. laptop"));
+    assert!(screen.contains("1. laptop (10.203.0.2, fd77:77::2)\n"));
+    assert!(!screen.contains(&format!("1. laptop ({device})")));
     assert!(screen.contains("[Interface]\nPrivateKey = "));
     assert!(screen.contains("Address = 10.203.0.2/16, fd77:77::2/128"));
     assert!(screen.contains("Endpoint = 192.0.2.2:51821"));

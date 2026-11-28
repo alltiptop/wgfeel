@@ -1,5 +1,3 @@
-#[path = "support/human.rs"]
-mod human;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -89,53 +87,17 @@ fn new_process_recovers_production_state_without_provider_and_emits_only_public_
     persisted_fixture(&fixture.0);
     let before = fs::read(fixture.0.join("state.json")).unwrap();
 
-    let human = ManagedChild::spawn(
-        ProcessSpec::new(
-            env!("CARGO_BIN_EXE_wgfeel").into(),
-            vec![
-                "state-check".into(),
-                "--state-dir".into(),
-                fixture.0.clone().into(),
-            ],
-            vec![],
-            None,
-        ),
-        ProcessLimits {
-            max_stdout_bytes: 4096,
-            max_stderr_bytes: 4096,
-        },
-    )
-    .unwrap()
-    .wait(Duration::from_secs(10))
-    .unwrap();
-    assert!(human.status.success());
+    let output = state_check(&fixture.0);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
     assert_eq!(
-        String::from_utf8(human.stdout).unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
         "Local state\n  Node ID        : gateway-a\n  Generation     : 17\n  Control        : child\n  Devices        : 1\n  Local Contexts : 0\n  Management ID  : main\n  Networks       : 1\n  Scope Networks : 1\n"
     );
-    assert!(human.stderr.is_empty());
-
-    // Both are actual fresh processes; no controller, provider, listener or test-only loader.
-    for _ in 0..2 {
-        let output = state_check(&fixture.0);
-        assert!(
-            output.status.success(),
-            "state-check failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let actual: serde_json::Value = human::summary(&output.stdout);
-        assert_eq!(
-            actual,
-            serde_json::json!({
-                "control":"child", "management_id":"main","scope_networks":1,"local_contexts":0,
-                "generation": 17,
-                "node_id": "gateway-a",
-                "networks": 1,
-                "devices": 1
-            })
-        );
-        assert!(output.stderr.is_empty());
-    }
     assert_eq!(fs::read(fixture.0.join("state.json")).unwrap(), before);
 }
 
@@ -172,6 +134,10 @@ fn corrupted_secret_state_fails_without_echoing_private_material() {
     let output = state_check(&fixture.0);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+    assert!(
+        !output.stderr.is_empty(),
+        "expected a diagnostic for corrupt state"
+    );
     assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
 }
 
